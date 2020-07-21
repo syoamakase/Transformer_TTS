@@ -94,6 +94,8 @@ if __name__ == '__main__':
 
     hp.configure(hp_file)
     fill_variables()
+    save_path = os.path.join(os.path.dirname(load_name), 'dev')
+    os.makedirs(save_path, exist_ok=True)
 
     # initialize pytorch
     # model = Transformer(src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, N_e=6, N_d=6, heads=8, d_model=384, dropout=hp.dropout)
@@ -116,7 +118,7 @@ if __name__ == '__main__':
     mean_value = np.load(hp.mean_file).reshape(-1, hp.mel_dim)
     var_value = np.load(hp.var_file).reshape(-1, hp.mel_dim)
 
-    for d in dataloader: 
+    for idx, d in enumerate(dataloader): 
         text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb = d
 
         text = text.to(DEVICE)
@@ -127,13 +129,12 @@ if __name__ == '__main__':
         stop_token = stop_token.to(DEVICE)
 
         batch_size = mel.shape[0]
-        # dummy_input = mel[:,0,:].unsqueeze(1)
         dummy_input = torch.zeros((1, 1, 80),dtype=torch.float, device=DEVICE)
 
         pos_mel = torch.arange(start=1,end=2,dtype=torch.long, device=DEVICE).unsqueeze(0)
         src_mask, trg_mask = create_masks(pos_text, pos_mel)
         mel_input = dummy_input
-        outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc= model(text, mel_input, src_mask, trg_mask)
+        outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, training=False)
 
         if hp.reduction_rate >= 1:
             b,t,c = outputs_prenet.shape
@@ -151,7 +152,7 @@ if __name__ == '__main__':
 
                 print(f'{i}')
 
-                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask)
+                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, training=False)
 
                 if case == 1:
                     mel_input = torch.cat((mel_input, outputs_postnet[:,-1,:].unsqueeze(1)), dim=1) 
@@ -172,8 +173,9 @@ if __name__ == '__main__':
                     if torch.sigmoid(outputs_stop_token)[0, -1] > 0.5:
                             break
             outputs = outputs_postnet[0].cpu().detach().numpy()
-            outputs *= var_value #torch.from_numpy(var_value).float().to(DEVICE)
-            outputs += mean_value  # torch.from_numpy(mean_value).float().to(DEVICE)
-            import pdb; pdb.set_trace()
-
+            outputs *= np.sqrt(var_value)
+            outputs += mean_value
+            output_name = os.path.join(save_path, str(idx)+'.npy'), outputs)
+            print(f'save {output_name}')
+            np.save(output_name, outputs)
             sys.stdout.flush()

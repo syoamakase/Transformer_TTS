@@ -5,6 +5,7 @@ import os
 import numpy as np
 import random
 import sys
+import shutil
 import torch
 from torch.autograd import Variable
 import torch.nn as nn
@@ -96,7 +97,7 @@ if __name__ == '__main__':
     fill_variables()
     log_config()
 
-    save_dir = hp.save_dir # save dir name
+
     model = Transformer(src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
@@ -125,7 +126,9 @@ if __name__ == '__main__':
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
 
+    save_dir = hp.save_dir # save dir name
     os.makedirs(save_dir, exist_ok=True)
+    shutil.copyfile(hp_file, f'${save_dir}/hparams.py')
     writer = SummaryWriter(f'{hp.log_dir}/logs/{hp.comment}')
 
     dataset_train = datasets.get_dataset(hp.train_script)
@@ -201,7 +204,7 @@ if __name__ == '__main__':
             loss = 0.0
             mel_loss = nn.L1Loss()(outputs_prenet, mel[:,hp.reduction_rate:,:])
             post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-            loss_token = F.binary_cross_entropy_with_logits(outputs_stop_token, stop_token[:,hp.reduction_rate:], size_average=True, pos_weight=torch.tensor(5.0))
+            loss_token = F.binary_cross_entropy_with_logits(outputs_stop_token, stop_token[:,hp.reduction_rate:], size_average=True, pos_weight=torch.tensor(8.0))
             loss = mel_loss + post_mel_loss
             loss += loss_token
 
