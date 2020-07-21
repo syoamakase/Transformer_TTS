@@ -68,4 +68,3 @@ echo "test_script = ${dev_path}" >> results
 echo "mean_file = ${mean_file}" >> results
 echo "var_file = ${var_file}" >> results
 echo "vocab_size = ${vocab_size}" >> results
-echo "training data =  data/train/script_${sampling_rate}/train_id_sort_xlen.txt"
