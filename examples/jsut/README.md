@@ -4,6 +4,13 @@
 
 After donwloading, please extract at this directory and specify `jsut_path` in `preprocess.sh`
 
+# Preprocess
+
+`bash preprocess.sh`
+
+After preprocessing, please fill variables of `../config/hpararms_template.py`
+
+
 ### What units does the duration of *.lab file use?
 
 In *.lab files, we see the label as follows:
