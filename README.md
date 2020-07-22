@@ -1,15 +1,24 @@
 # Transformer_TTS
 
-This repository is for Text-to-Speech (TTS) project.
-
+This repository is Text-to-Speech (TTS) project based on Transformer.
 
 ## train
 
 `python train.py --hp_file config/hparams_template.py`
 
+If you want to check a loss curve, `tensorboard --logdir <save_dir>/logs`
+
+### hparams.py
+
+`hparams.py` is a file to control hyper parameters.
+
+When you use your own dataset, you adjust at least `train_script`, `test_script`,
+`mean_file`, `var_file`, and `vocab_size`.
+
 ## test
+
 `python test.py --load_name <save directory of model>`
 
 # TODO
-- add preprocess of LJSpeech (En) and JSUT (Ja)
+- add preprocess of LJSpeech (En)
 - add FastSpeech2

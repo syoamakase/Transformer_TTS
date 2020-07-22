@@ -4,12 +4,15 @@
 
 After donwloading, please extract at this directory and specify `jsut_path` in `preprocess.sh`
 
+# Requirements
+
+`pip install -r requirements.txt`
+
 # Preprocess
 
 `bash preprocess.sh`
 
-After preprocessing, please fill variables of `../config/hpararms_template.py`
-
+After preprocessing, please fill out variables of `../config/hpararms_template.py`
 
 ### What units does the duration of *.lab file use?
 
@@ -20,6 +23,6 @@ In *.lab files, we see the label as follows:
 ANSWER:
 
 Basically, the unit is second.
-To convert second, we should use below calculation.
+To convert second, we should use the below calculation.
 
 `raw / 10000000.0`
