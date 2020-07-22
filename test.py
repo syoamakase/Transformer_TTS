@@ -175,7 +175,7 @@ if __name__ == '__main__':
             outputs = outputs_postnet[0].cpu().detach().numpy()
             outputs *= np.sqrt(var_value)
             outputs += mean_value
-            output_name = os.path.join(save_path, str(idx)+'.npy'), outputs)
+            output_name = os.path.join(save_path, str(idx)+'.npy')
             print(f'save {output_name}')
             np.save(output_name, outputs)
             sys.stdout.flush()
