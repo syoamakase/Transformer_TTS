@@ -81,7 +81,7 @@ class TrainDatasets(Dataset):
         
         if hp.mean_file is not None and hp.var_file is not None:
             mel_input -= self.mean_value
-            mel_input /= self.var_value
+            mel_input /= np.sqrt(self.var_value)
 
         mel_input = np.concatenate([np.zeros([1,hp.mel_dim], np.float32), mel_input], axis=0)
         text_length = len(text)
@@ -105,7 +105,7 @@ class TestDatasets(Dataset):
             root_dir (string): Directory with all the wavs.                     
         """
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)  
-        self.landmarks_frame = self._check_files()
+        #self.landmarks_frame = self._check_files()
         if hp.spm_model is not None:
             self.sp = spm.SentencePieceProcessor()
             self.sp.Load(hp.spm_model)
@@ -316,7 +316,9 @@ class NumBatchSampler(Sampler):
     def _batch_indices(self):
         batch_len = self.dataset_len // self.batch_size
         mod = self.dataset_len % self.batch_size
-        all_indices = np.arange(self.dataset_len-mod).reshape(batch_len, self.batch_size)
+        all_indices = np.arange(self.dataset_len-mod).reshape(batch_len, self.batch_size).tolist()
+        remained = np.arange(self.dataset_len-mod, self.dataset_len).tolist()
+        all_indices.append(remained) 
        
         return all_indices
 

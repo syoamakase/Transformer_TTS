@@ -5,6 +5,7 @@ import torch
 import argparse
 import numpy as np
 from scipy.io.wavfile import read
+# import pyworld as pw
 
 from utils.stft import TacotronSTFT
 from utils import hparams as hp
@@ -30,8 +31,11 @@ def main(hp, args):
             wav = np.pad(wav, (0, hp.segment_length + hp.pad_short - len(wav)), \
                     mode='constant', constant_values=0.0)
 
+        # f0, _ = pw.dio(wav.astype(np.float64), hp.sampling_rate, frame_period=hp.hop_length/hp.sampling_rate*1000)
+
         wav = torch.from_numpy(wav).unsqueeze(0)
-        mel = stft.mel_spectrogram(wav)
+        mel, energy = stft.mel_spectrogram(wav)
+        # f0 = f0[:sum(duration)]
 
         melpath = os.path.join(args.out_path, os.path.basename(wavpath.replace('.wav', '.npy')))
         # amppath = os.path.join(args.out_path, os.path.basename(wavpath.replace('.wav', '_amp.npy')))

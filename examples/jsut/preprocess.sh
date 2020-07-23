@@ -41,11 +41,11 @@ python tools/make_sox.py data/dev/wavlist --save_dir data/dev/${wav_dir} --sampl
 python preprocess.py --hp_file config/${hparams_path} -d data/train/${wav_dir}
 python preprocess.py --hp_file config/${hparams_path} -d data/dev/${wav_dir}
 
-cut -d ' ' -f 2- data/train/train_all.txt > data/train/input_sentencepiece.txt
+python tools/cut.py -d '|' -f 1- data/train/train_all.txt > data/train/input_sentencepiece.txt
 
-python tools/make_vocab.py data/train/input_sentencepiece.txt > data/train/vocab.id
-python tools/apply_vocab.py data/train/train.txt --vocab_id data/train/vocab.id > tmp/train_id.txt
-python tools/apply_vocab.py data/dev/dev.txt --vocab_id data/train/vocab.id > tmp/dev_id.txt
+python tools/make_vocab.py data/train/input_sentencepiece.txt --ignore_labels "sil" > data/train/vocab.id
+python tools/apply_vocab.py data/train/train.txt --vocab_id data/train/vocab.id --ignore_labels "sil" > tmp/train_id.txt
+python tools/apply_vocab.py data/dev/dev.txt --vocab_id data/train/vocab.id --ignore_labels "sil" > tmp/dev_id.txt
 
 python tools/cut.py -d '/' -f -1 tmp/train_id.txt > tmp/train_id.2.txt
 python tools/cut.py -d '/' -f -1 tmp/dev_id.txt > tmp/dev_id.2.txt
