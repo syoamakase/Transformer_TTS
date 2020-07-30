@@ -231,7 +231,10 @@ def _round_up(x, multiple):
     return x if remainder == 0 else x + multiple - remainder
 
 def _pad_mel(inputs):
-    _pad = -5.0
+    if hp.mean_file is None and hp.var_file is None:
+        _pad = -5.0
+    else:
+        _pad = -0.5
     def _pad_one(x, max_len):
         mel_len = x.shape[0]
         max_len_reduction = _round_up(max_len, hp.reduction_rate)
@@ -294,7 +297,6 @@ class LengthsBatchSampler(Sampler):
         if self.reverse:
             self.all_indices.reverse()
 
-        print(self.all_indices)
         for indices in self.all_indices:
             yield indices
 
@@ -317,8 +319,9 @@ class NumBatchSampler(Sampler):
         batch_len = self.dataset_len // self.batch_size
         mod = self.dataset_len % self.batch_size
         all_indices = np.arange(self.dataset_len-mod).reshape(batch_len, self.batch_size).tolist()
-        remained = np.arange(self.dataset_len-mod, self.dataset_len).tolist()
-        all_indices.append(remained) 
+        if mod != 0:
+            remained = np.arange(self.dataset_len-mod, self.dataset_len).tolist()
+            all_indices.append(remained) 
        
         return all_indices
 
