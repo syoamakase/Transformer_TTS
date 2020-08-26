@@ -12,13 +12,15 @@ If you want to check a loss curve, `tensorboard --logdir <save_dir>/logs`
 
 `hparams.py` is a file to control hyper parameters.
 
-When you use your own dataset, you adjust at least `train_script`, `test_script`,
-`mean_file`, `var_file`, and `vocab_size`.
+When you use your own dataset, you must adjust`train_script`, `test_script`, `mean_file`, `var_file`, and `vocab_size`.
 
 ## test
 
-`python test.py --load_name <save directory of model>`
+When you generate a speech, please take an average.
+`python utils/average_checkpoints.py --backend pytorch --snapshots <save directory>/network.epoch* --out <save directory>/network.average_epoch991-epoch1000 --start 991 --end 1000`
+
+
+`python test.py --load_name <model path>`
 
 # TODO
-- add preprocess of LJSpeech (En)
 - add FastSpeech2
