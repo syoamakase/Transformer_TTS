@@ -9,7 +9,8 @@ def attention(q, k, v, d_k, mask, dropout):
 
     if mask is not None:
         mask = mask.unsqueeze(1)
-        scores = scores.masked_fill(mask==0, -1e10)
+        #scores = scores.masked_fill(mask==0, -1e10)
+        scores = scores.masked_fill(mask==0, -1e4)
         scores = torch.softmax(scores, dim=-1)
     else:
         scores = F.softmax(scores, dim=-1)
@@ -86,7 +87,7 @@ class FeedForward(nn.Module):
 
 class PositionalEncoder(nn.Module):
     # copy
-    def __init__(self, d_model, max_seq_len=1500, dropout=0.1):
+    def __init__(self, d_model, max_seq_len=5000, dropout=0.1):
         super().__init__()
         self.d_model = d_model
         self.dropout = nn.Dropout(dropout)
@@ -99,13 +100,10 @@ class PositionalEncoder(nn.Module):
                 math.sin(pos / (10000 ** ((2 * i)/d_model)))
                 pe[pos, i + 1] = \
                 math.cos(pos / (10000 ** ((2 * (i + 1))/d_model)))
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.pe = pe.unsqueeze(0)
 
     def forward(self, x):
         seq_len = x.shape[1]
-        pe = self.pe[:,:seq_len]
-        if x.is_cuda:
-            pe.cuda()
+        pe = self.pe[:,:seq_len].to(x.device)
         x = x + self.alpha * pe
         return self.dropout(x)

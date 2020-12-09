@@ -9,7 +9,7 @@ class DecoderPreNet(nn.Module):
     """
     Prenet before passing through the network
     """
-    def __init__(self, input_size, output_size, hidden_size=256, p=0.5):
+    def __init__(self, input_size, output_size, hidden_size=256, p=0.5, output_type=None):
         """
         :param input_size: dimension of input
         :param hidden_size: dimension of hidden unit
@@ -19,18 +19,28 @@ class DecoderPreNet(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.hidden_size = hidden_size
-        self.layer = nn.Sequential(OrderedDict([
-             ('fc1', nn.Linear(self.input_size, self.hidden_size)),
-             ('relu1', nn.ReLU()),
-             ('dropout1', nn.Dropout(p)),
-             ('fc2', nn.Linear(self.hidden_size, self.output_size)),
-             ('relu2', nn.ReLU()),
-             ('dropout2', nn.Dropout(p)),
-        ]))
+
+        if output_type:
+            self.layer = nn.Sequential(OrderedDict([
+                ('fc1', nn.Embedding(self.input_size, self.hidden_size)),
+                ('relu1', nn.ReLU()),
+                ('dropout1', nn.Dropout(p)),
+                ('fc2', nn.Linear(self.hidden_size, self.output_size)),
+                ('relu2', nn.ReLU()),
+                ('dropout2', nn.Dropout(p)),
+            ]))
+        else:
+            self.layer = nn.Sequential(OrderedDict([
+                ('fc1', nn.Linear(self.input_size, self.hidden_size)),
+                ('relu1', nn.ReLU()),
+                ('dropout1', nn.Dropout(p)),
+                ('fc2', nn.Linear(self.hidden_size, self.output_size)),
+                ('relu2', nn.ReLU()),
+                ('dropout2', nn.Dropout(p)),
+            ]))
 
     def forward(self, input_):
         out = self.layer(input_)
-
         return out
 
 class EncoderPreNet(nn.Module):
