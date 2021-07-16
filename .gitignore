@@ -13,8 +13,7 @@ dev/
 
 train_AlignTTS.py
 # Byte-compiled / optimized / DLL files
-
-Models/__pycache__
+Models/__pycache__/*.pyc
 __pycache__/
 *.py[cod]
 *$py.class
