@@ -1,40 +1,43 @@
 # -*- coding: utf-8 -*-
 
+import argparse
 import pandas as pd
 import numpy as np
 import librosa
 import collections
 import os
+from typing import Optional
+from operator import itemgetter
 import random
 from struct import unpack, pack
 import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
-import librosa
+from torch.utils.data import Dataset, DataLoader, SequentialSampler, Sampler
+from torch.utils.data.distributed import DistributedSampler
 import sentencepiece as spm
-from tqdm import tqdm 
+from tqdm import tqdm
 
-from utils import hparams as hp
-
-class TrainDatasets(Dataset):                                                     
+class TrainDatasets(Dataset):
     """
     Train dataset.
     """                                                   
-    def __init__(self, csv_file):                                     
+    def __init__(self, csv_file, hp, alignment_pred=True, pitch_pred=True, energy_pred=True):
         """
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.                
         """
-        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)    
-        if hp.spm_model is not None:
+        self.hp = hp
+        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        if self.hp.spm_model is not None:
             self.sp = spm.SentencePieceProcessor()
-            self.sp.Load(hp.spm_model)
+            self.sp.Load(self.hp.spm_model)
 
-        if hp.mean_file is not None and hp.var_file is not None:
-            self.mean_value = np.load(hp.mean_file).reshape(-1, hp.mel_dim)
-            self.var_value = np.load(hp.var_file).reshape(-1, hp.mel_dim)
-                                                                                
-    def load_wav(self, filename):                                               
-        return librosa.load(filename, sr=hp.sample_rate) 
+        if self.hp.mean_file is not None and self.hp.var_file is not None:
+            self.mean_value = np.load(self.hp.mean_file).reshape(-1, self.hp.mel_dim)
+            self.var_value = np.load(self.hp.var_file).reshape(-1, self.hp.mel_dim)
+
+        self.pred_alignment = alignment_pred
+        self.pred_f0 = pitch_pred
+        self.pred_energy = energy_pred
 
     def load_htk(self, filename):
         fh = open(filename, "rb")
@@ -46,10 +49,10 @@ class TrainDatasets(Dataset):
         dat = dat.reshape(int(len(dat) / veclen), veclen)
         dat = dat.byteswap()
         fh.close()
-        return dat                      
-                                                                                
+        return dat
+
     def __len__(self):                                                          
-        return len(self.landmarks_frame)                          
+        return len(self.landmarks_frame)
 
     def __getitem__(self, idx): 
         mel_name = self.landmarks_frame.loc[idx, 0]
@@ -58,54 +61,69 @@ class TrainDatasets(Dataset):
         energy_name = mel_name.replace('.npy', '_energy.npy')
         text = self.landmarks_frame.loc[idx, 1].strip()
         
-        if hp.is_multi_speaker:
+        if self.hp.is_multi_speaker:
             spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
-            if hp.spk_emb_type == 'speaker_id':
+            if self.hp.spk_emb_type == 'speaker_id':
                 spk_emb = int(spk_emb_name)
             else:
                 spk_emb = np.load(spk_emb_name.strip())
         else:
             spk_emb = None
 
-        if hp.spm_model is not None:
+        if self.hp.spm_model is not None:
             textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text)+ [self.sp.eos_id()]
             text = np.array([int(t) for t in textids], dtype=np.int32)
         else:
             text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
         if '.npy' in mel_name:
             mel_input = np.load(mel_name)
-            assert mel_input.shape[0] == hp.mel_dim or mel_input.shape[1] == hp.mel_dim, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
-            if mel_input.shape[1] != hp.mel_dim:
-                mel_input = mel_input.reshape(-1, hp.mel_dim)
+            assert mel_input.shape[0] == self.hp.mel_dim or mel_input.shape[1] == self.hp.mel_dim, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
+            if mel_input.shape[1] != self.hp.mel_dim:
+                mel_input = mel_input.reshape(-1, self.hp.mel_dim)
         elif '.htk' in mel_name:
-            mel_input = self.load_htk(mel_name)[:,:hp.mel_dim]
+            mel_input = self.load_htk(mel_name)[:,:self.hp.mel_dim]
         elif '.mel' in mel_name:
             mel_input = torch.load(mel_name).squeeze(0).transpose(0,1).numpy()
         else:
             raise ValueError('{} is unknown file extension. Please check the extension or change htk or npy'.format(mel_name))
 
-        alignment = np.load(alignment_name)
-        f0 = np.load(f0_name)
-        energy = np.load(energy_name)
+        if self.pred_alignment:
+            alignment = np.load(alignment_name)
+        else:
+            alignment = None
+        if self.pred_f0:
+            f0 = np.load(f0_name)
+        else:
+            f0 = None
+        if self.pred_energy:
+            energy = np.load(energy_name)
+        else:
+            energy = None
         
-        if hp.mean_file is not None and hp.var_file is not None:
+        if self.hp.mean_file is not None and self.hp.var_file is not None:
             mel_input -= self.mean_value
             mel_input /= np.sqrt(self.var_value)
 
+        if self.hp.model.lower() == 'fastspeech2':
+            mel_length = mel_input.shape[0]
+            reduction_rate = 1
+        else:
+            mel_input = np.concatenate([np.zeros([1, self.hp.mel_dim], np.float32), mel_input], axis=0)
+            mel_length = _round_up(mel_input.shape[0], self.hp.reduction_rate)
+            reduction_rate = self.hp.reduction_rate
+
         text_length = len(text)
         stop_token = torch.zeros(mel_input.shape[0])
-        #mel_length = _round_up(mel_input.shape[0], hp.reduction_rate) 
-        mel_length = mel_input.shape[0]
         pos_text = np.arange(1, text_length+1)
         pos_mel = np.arange(1, mel_length+1)
 
         sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel,
-                  'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment}
-                                                                                
+                  'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment,
+                  'reduction_rate': reduction_rate, 'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type}
         return sample
 
 class VQWav2vecTrainDatasets(Dataset):
-    def __init__(self, csv_file):
+    def __init__(self, hp, csv_file):
         """                                                                     
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.           
@@ -113,6 +131,7 @@ class VQWav2vecTrainDatasets(Dataset):
         """                                                                     
         # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)  
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        self.hp = hp
         if hp.spm_model is not None:
             self.sp = spm.SentencePieceProcessor()
             self.sp.Load(hp.spm_model)
@@ -128,12 +147,12 @@ class VQWav2vecTrainDatasets(Dataset):
         return len(self.landmarks_frame)
                                         
     def __getitem__(self, idx):
-        mel_name = self.landmarks_frame.loc[idx, 0].replace('.npy', '_idx.npy')
+        mel_name = self.landmarks_frame.loc[idx, 0]
         alignment_name = mel_name.replace('_idx.npy', '_alignment.npy')
         text = self.landmarks_frame.loc[idx, 1].strip()
-        if hp.is_multi_speaker:
+        if self.hp.is_multi_speaker:
             spk_emb_name = self.landmarks_frame.loc[idx, 2]
-            if hp.spk_emb_type == 'speaker_id':
+            if self.hp.spk_emb_type == 'speaker_id':
                 spk_emb = int(spk_emb_name)
             else:
                 spk_emb = np.load(spk_emb_name.strip())
@@ -141,20 +160,20 @@ class VQWav2vecTrainDatasets(Dataset):
             spk_emb = None
                                                                                 
         alignment = np.load(alignment_name)
-        if hp.spm_model is not None:
+        if self.hp.spm_model is not None:
             textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text) + [self.sp.eos_id()]
             text = np.array([int(t) for t in textids], dtype=np.int32)
         else:
             text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
         if '.npy' in mel_name:
             mel_input = np.load(mel_name)
-            assert mel_input.shape[0] == hp.num_group or mel_input.shape[1] == hp.num_group, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
-            if mel_input.shape[1] != hp.num_group:
+            assert mel_input.shape[0] == self.hp.num_group or mel_input.shape[1] == self.hp.num_group, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
+            if mel_input.shape[1] != self.hp.num_group:
                 #mel_input = mel_input.reshape(-1, hp.num_group)
                 mel_input = mel_input.T
                 
         elif '.htk' in mel_name:
-            mel_input = self.load_htk(mel_name)[:,:hp.mel_dim]
+            mel_input = self.load_htk(mel_name)[:,:self.hp.mel_dim]
         elif '.mel' in mel_name:
             mel_input = torch.load(mel_name).squeeze(0).transpose(0,1)
         else:
@@ -167,55 +186,57 @@ class VQWav2vecTrainDatasets(Dataset):
         pos_mel = np.arange(1, mel_length + 1)
         stop_token = torch.zeros(mel_length)
                                                                                 
-        sample = {'text': text, 'text_length': text_length, 'mel_input': mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'alignment':alignment}
-                                                                                
+        sample = {'text': text, 'text_length': text_length, 'mel_input': mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'alignment':alignment, 'is_multi_speaker':self.hp.is_multi_speaker}
+
         return sample
 
 class TestDatasets(Dataset):
     """
     Test dataset.
-    """                                                   
-    def __init__(self, csv_file):                                     
-        """                                                                     
-        Args:                                                                   
-            csv_file (string): Path to the csv file with annotations.           
-            root_dir (string): Directory with all the wavs.                     
+    """ 
+    def __init__(self, csv_file, hp):
+        """                                               
+        Args:
+            csv_file (string): Path to the csv file with annotations.
+            root_dir (string): Directory with all the wavs.
         """
-        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)  
-        if hp.spm_model is not None:
+        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        self.hp = hp
+        if self.hp.spm_model is not None:
             self.sp = spm.SentencePieceProcessor()
-            self.sp.Load(hp.spm_model)
+            self.sp.Load(self.hp.spm_model)
 
-        if hp.mean_file is not None and hp.var_file is not None:
-            self.mean_value = np.load(hp.mean_file).reshape(-1, hp.mel_dim)
-            self.var_value = np.load(hp.var_file).reshape(-1, hp.mel_dim)
+        if self.hp.mean_file is not None and self.hp.var_file is not None:
+            self.mean_value = np.load(self.hp.mean_file).reshape(-1, self.hp.mel_dim)
+            self.var_value = np.load(self.hp.var_file).reshape(-1, self.hp.mel_dim)
 
     def __len__(self):                                                          
         return len(self.landmarks_frame)
 
-    def __getitem__(self, idx): 
+    def __getitem__(self, idx):
         mel_output = self.landmarks_frame.loc[idx, 0]
         text = self.landmarks_frame.loc[idx, 1].strip()
-        if hp.is_multi_speaker:
+        if self.hp.is_multi_speaker:
             spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
-            if hp.spk_emb_type == 'speaker_id':
+            if self.hp.spk_emb_type == 'speaker_id':
                 spk_emb = int(spk_emb_name)
             else:
                 spk_emb = np.load(spk_emb_name.strip())
         else:
             spk_emb = None
 
-        if hp.spm_model is not None:
+        if self.hp.spm_model is not None:
             textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text)+ [self.sp.eos_id()]
             text = np.array([int(t) for t in textids], dtype=np.int32)
         else:
             text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
 
-        text_length = len(text)                        
+        text_length = len(text)
         pos_text = np.arange(1, text_length+1)
 
-        sample = {'text': text, 'text_length':text_length, 'mel_output':mel_output, 'pos_text':pos_text, 'spk_emb':spk_emb}
-                                                                                
+        sample = {'text': text, 'text_length':text_length, 'mel_output':mel_output, 'pos_text':pos_text, 'spk_emb':spk_emb,
+                  'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type}
+
         return sample
     
     def _check_files(self):
@@ -278,77 +299,88 @@ class VQWav2vecTestDatasets(Dataset):
 def collate_fn_test(batch):
     # Puts each data field into a tensor with outer dimension batch size
     if isinstance(batch[0], collections.abc.Mapping):
+        spk_emb_type = batch[0]['spk_emb_type']
+        is_multi_speaker = batch[0]['is_multi_speaker']
         text = [d['text'] for d in batch]
         mel_output = [d['mel_output'] for d in batch]
         text_length = [d['text_length'] for d in batch]
         pos_text = [d['pos_text'] for d in batch]
         spk_emb = [d['spk_emb'] for d in batch]
-        
-        #text = [i for i, in sorted(zip(text, text_length), key=lambda x: x[1], reverse=True)]
-        #mel_output = [i for i, in sorted(zip(mel_output, text_length), key=lambda x: x[1], reverse=True)]
-        #pos_text = [i for i, in sorted(zip(pos_text, text_length), key=lambda x: x[1], reverse=True)]
-        #text_length = [i for i, in sorted(zip(text_length, text_length), key=lambda x: x[1], reverse=True)]
-        #spk_emb = [i for i, in sorted(zip(spk_emb, text_length), key=lambda x: x[1], reverse=True)]
-        # PAD sequences with largest length of the batch
+
         text = _prepare_data(text).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
 
-        if hp.is_multi_speaker:
-            if hp.spk_emb_type == 'speaker_id':
-                return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), torch.LongTensor(spk_emb)
-            elif hp.spk_emb_type == 'x_vector':
-                return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), torch.FloatTensor(spk_emb)
+        if is_multi_speaker:
+            if spk_emb_type == 'speaker_id':
+                spk_emb = torch.LongTensor(spk_emb)
+            elif spk_emb_type == 'x_vector':
+                spk_emb = torch.FloatTensor(spk_emb)
         else:
-            return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), None
+            spk_emb = None
+        return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
 
 def collate_fn(batch):
     # Puts each data field into a tensor with outer dimension batch size
     if isinstance(batch[0], collections.abc.Mapping):
-#         sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel,
-                #   'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment}
+        reduction_rate = batch[0]['reduction_rate']
+        spk_emb_type = batch[0]['spk_emb_type']
+        is_multi_speaker = batch[0]['is_multi_speaker']
 
         text = [d['text'] for d in batch]
         mel_input = [d['mel_input'] for d in batch]
         text_length = [d['text_length'] for d in batch]
         mel_length = [d['mel_length'] for d in batch]
         pos_mel = [d['pos_mel'] for d in batch]
-        pos_text= [d['pos_text'] for d in batch]
+        pos_text = [d['pos_text'] for d in batch]
         stop_token = [d['stop_token'] for d in batch]
         spk_emb = [d['spk_emb'] for d in batch]
         f0 = [d['f0'] for d in batch]
         energy = [d['energy'] for d in batch]
         alignment = [d['alignment'] for d in batch]
         
-        #text = [i for i, in sorted(zip(text, mel_length), key=lambda x: x[1], reverse=True)]
-        #mel_input = [i for i,  in sorted(zip(mel_input, mel_length), key=lambda x: x[1], reverse=True)]
-        #pos_text = [i for i,  in sorted(zip(pos_text, mel_length), key=lambda x: x[1], reverse=True)]
-        #pos_mel = [i for i,  in sorted(zip(pos_mel, mel_length), key=lambda x: x[1], reverse=True)]
-        #text_length =[i for i,  in sorted(zip(text_length, mel_length), key=lambda x: x[1], reverse=True)]
-        #spk_emb = [i for i, in sorted(zip(spk_emb, mel_length), key=lambda x: x[1], reverse=True)]
-        #stop_token = [i for i, in sorted(zip(stop_token, mel_length), key=lambda x: x[1], reverse=True)]
-        #f0 = [i for i, in sorted(zip(f0, mel_length), key=lambda x: x[1], reverse=True)]
-        #energy = [i for i, in sorted(zip(energy, mel_length), key=lambda x: x[1], reverse=True)]
-        #alignment = [i for i, in sorted(zip(alignment, mel_length), key=lambda x: x[1], reverse=True)]
-        #mel_length = sorted(mel_length, reverse=True)
-        # PAD sequences with largest length of the batch
+        pred_alignment = alignment[0] is not None
+        pred_f0 = f0[0] is not None
+        pred_energy = energy[0] is not None
+
         text = _prepare_data(text).astype(np.int32)
-        mel_input = _pad_mel(mel_input)
+        mel_input = _pad_mel(mel_input, reduction_rate)
         pos_mel = _prepare_data(pos_mel).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
-        f0 = _prepare_data(f0).astype(np.float64)
-        energy = _prepare_data(energy).astype(np.float64)
-        alignment = _prepare_data(alignment).astype(np.int32)
-        stop_token = _pad_stop_token(stop_token, _pad=1.0)
-
-        if hp.is_multi_speaker:
-            if hp.spk_emb_type == 'x_vector':
-                return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_length), torch.FloatTensor(stop_token), torch.FloatTensor(spk_emb), torch.FloatTensor(f0), torch.FloatTensor(energy), torch.LongTensor(alignment)
-            elif hp.spk_emb_type == 'speaker_id':
-                return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_length), torch.FloatTensor(stop_token), torch.LongTensor(spk_emb), torch.FloatTensor(f0), torch.FloatTensor(energy), torch.LongTensor(alignment)
-            else:
-                raise AttributeError(f'{hp.spk_emb_type} is unknown in hp.spk_emb_type')
+        if pred_f0:
+            f0 = _prepare_data(f0).astype(np.float64)
+            f0 = torch.FloatTensor(f0)
         else:
-            return torch.LongTensor(text), torch.FloatTensor(mel_input), torch.LongTensor(pos_text), torch.LongTensor(pos_mel), torch.LongTensor(text_length), torch.LongTensor(mel_length), torch.FloatTensor(stop_token), None, torch.FloatTensor(f0), torch.FloatTensor(energy), torch.LongTensor(alignment)
+            f0 = None
+        if pred_energy:
+            energy = _prepare_data(energy).astype(np.float64)
+            energy = torch.FloatTensor(energy)
+        else:
+            energy = None
+
+        if pred_alignment:
+            alignment = _prepare_data(alignment).astype(np.int32)
+            alignment = torch.LongTensor(alignment)
+        else:
+            alignment = None
+        stop_token = _pad_stop_token(stop_token, reduction_rate, _pad=1.0)
+
+        text = torch.LongTensor(text)
+        mel_input = torch.FloatTensor(mel_input)
+        pos_text = torch.LongTensor(pos_text)
+        pos_mel = torch.LongTensor(pos_mel)
+        text_length = torch.LongTensor(text_length)
+        mel_length = torch.LongTensor(mel_length)
+        stop_token = torch.FloatTensor(stop_token)
+
+        if is_multi_speaker:
+            if spk_emb_type == 'x_vector':
+                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, torch.FloatTensor(spk_emb), f0, energy, alignment
+            elif spk_emb_type == 'speaker_id':
+                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, torch.LongTensor(spk_emb), f0, energy, alignment
+            else:
+                raise AttributeError(f'{spk_emb_type} is unknown in spk_emb_type')
+        else:
+            return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, None, torch.FloatTensor(f0), energy, alignment
 
     raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
                     .format(type(batch[0]))))
@@ -365,6 +397,7 @@ def collate_fn_vqwav2vec(batch):
         stop_token = [d['stop_token'] for d in batch]
         spk_emb = [d['spk_emb'] for d in batch]
         alignment = [d['alignment'] for d in batch]
+        is_multi_speaker = batch[0]['is_multi_speaker']
         
         text = [i for i,_ in sorted(zip(text, mel_length), key=lambda x: x[1], reverse=True)]
         mel_input = [i for i, _ in sorted(zip(mel_input, mel_length), key=lambda x: x[1], reverse=True)]
@@ -377,14 +410,14 @@ def collate_fn_vqwav2vec(batch):
         mel_length = sorted(mel_length, reverse=True)
         # PAD sequences with largest length of the batch
         text = _prepare_data(text).astype(np.int32)
-        mel_input = _pad_mel(mel_input, 320)
+        mel_input = _pad_mel(mel_input, _pad=320)
         pos_mel = _prepare_data(pos_mel).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
         alignment = _prepare_data(alignment).astype(np.int32)
         stop_token = _pad_stop_token(stop_token, _pad=1.0)
         # stop_token = torch.nn.utils.rnn.pad_sequence(stop_token, batch_first=True, padding_value=1)
 
-        if hp.is_multi_speaker:
+        if is_multi_speaker:
             if hp.spk_emb_type == 'x_vector':
                 spkr_emb_out = torch.FloatTensor(spk_emb)
             elif hp.spk_emb_type == 'speaker_id':
@@ -432,7 +465,7 @@ def collate_fn_vqwav2vec_test(batch):
         f0 = None
         energy = None
 
-        return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), None, spkr_emb_out
+        return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spkr_emb_out
 
     raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}".format(type(batch[0]))))
 
@@ -459,25 +492,26 @@ def get_param_size(model):
 
 def _round_up(x, multiple):
     remainder = x % multiple
+    #return x if remainder == 0 else x + multiple + remainder
     return x if remainder == 0 else x + multiple - remainder
 
-def _pad_mel(inputs, _pad=None):
+def _pad_mel(inputs, reduction_rate=1, _pad=None):
     if not _pad:
-        if hp.mean_file is None and hp.var_file is None:
-             _pad = -5.0
-        else:
-            _pad = -0.5
+        #if hp.mean_file is None and hp.var_file is None:
+        #     _pad = -5.0
+        #else:
+        _pad = -0.5
     def _pad_one(x, max_len):
         mel_len = x.shape[0]
-        max_len_reduction = _round_up(max_len, hp.reduction_rate)
-        return np.pad(x, [[0, max_len_reduction - mel_len],[0,0]], mode='constant', constant_values=_pad)
+        max_len_reduction = _round_up(max_len, reduction_rate)
+        return np.pad(x, [[0, max_len_reduction - mel_len], [0,0]], mode='constant', constant_values=_pad)
     max_len = max((x.shape[0] for x in inputs))
     return np.stack([_pad_one(x, max_len) for x in inputs])
 
-def _pad_stop_token(inputs, _pad=1.0):
+def _pad_stop_token(inputs, reduction_rate=1, _pad=1.0):
     def _pad_one(x, max_len):
         mel_len = x.shape[0]
-        max_len_reduction = _round_up(max_len, hp.reduction_rate)
+        max_len_reduction = _round_up(max_len, reduction_rate)
         return np.pad(x, (0, max_len_reduction - mel_len), mode='constant', constant_values=_pad)
     max_len = max((x.shape[0] for x in inputs))
     return np.stack([_pad_one(x, max_len) for x in inputs])
@@ -486,8 +520,11 @@ class LengthsBatchSampler(Sampler):
     """
     LengthsBatchSampler - Sampler for variable batch size. Mainly, we use it for Transformer.
     It requires lengths.
+
+    Args:
+        dataset (torch.nn.dataset)
     """
-    def __init__(self, dataset, n_lengths, lengths_file=None, shuffle=True, shuffle_one_time=False, reverse=False):
+    def __init__(self, dataset, n_lengths, hp, lengths_file=None, shuffle=True, shuffle_one_time=False, reverse=False):
         assert not ((shuffle == reverse) and shuffle is True), 'shuffle and reverse cannot set True at the same time.'
 
         if lengths_file is None or not os.path.exists(lengths_file):
@@ -519,12 +556,14 @@ class LengthsBatchSampler(Sampler):
         all_indices = []
         while self.count + 1 < len(self.lengths_np):
             indices = []
-            mel_lengths = 0
+            max_len = 0
             while self.count < len(self.lengths_np):
                 curr_len = self.lengths_np[self.count]
-                if mel_lengths + curr_len > self.n_lengths or (self.count + 1) > len(self.lengths_np):
+                mel_lengths = max(max_len, curr_len) * (len(indices) + 1)
+                if mel_lengths > self.n_lengths or (self.count + 1) > len(self.lengths_np):
                     break
-                mel_lengths += curr_len
+                max_len = max(max_len, curr_len)
+                #mel_lengths += curr_len
                 indices.extend([self.count])
                 self.count += 1
             all_indices.append(indices)
@@ -575,6 +614,80 @@ class NumBatchSampler(Sampler):
     def __len__(self):
         return len(self.all_indices)
 
+class DistributedSamplerWrapper(DistributedSampler):
+    """
+    Wrapper over `Sampler` for distributed training.
+    Allows you to use any sampler in distributed mode.
+    It is especially useful in conjunction with
+    `torch.nn.parallel.DistributedDataParallel`. In such case, each
+    process can pass a DistributedSamplerWrapper instance as a DataLoader
+    sampler, and load a subset of subsampled data of the original dataset
+    that is exclusive to it.
+    .. note::
+        Sampler is assumed to be of constant size.
+    """
+
+    def __init__(
+        self,
+        sampler,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+    ):
+        """
+        Args:
+            sampler: Sampler used for subsampling
+            num_replicas (int, optional): Number of processes participating in
+              distributed training
+            rank (int, optional): Rank of the current process
+              within ``num_replicas``
+            shuffle (bool, optional): If true (default),
+              sampler will shuffle the indices
+        """
+        super(DistributedSamplerWrapper, self).__init__(
+            DatasetFromSampler(sampler),
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+        )
+        self.sampler = sampler
+
+    def __iter__(self):
+        """@TODO: Docs. Contribution is welcome."""
+        self.dataset = DatasetFromSampler(self.sampler)
+        indexes_of_indexes = super().__iter__()
+        subsampler_indexes = self.dataset
+        return iter(itemgetter(*indexes_of_indexes)(subsampler_indexes))
+
+class DatasetFromSampler(Dataset):
+    """Dataset to create indexes from `Sampler`.
+    Args:
+        sampler: PyTorch sampler
+    """
+
+    def __init__(self, sampler: Sampler):
+        """Initialisation for DatasetFromSampler."""
+        self.sampler = sampler
+        self.sampler_list = None
+
+    def __getitem__(self, index: int):
+        """Gets element of the dataset.
+        Args:
+            index: index of the element in the dataset
+        Returns:
+            Single element by index
+        """
+        if self.sampler_list is None:
+            self.sampler_list = list(self.sampler)
+        return self.sampler_list[index]
+
+    def __len__(self) -> int:
+        """
+        Returns:
+            int: length of the dataset
+        """
+        return len(self.sampler)
+
 def get_dataset(script_file='examples/LJSpeech/data/train/script_16000/train_id_sort_xlen.txt'):
     print(f'script_file = {script_file}')
     return TrainDatasets(script_file)
@@ -584,14 +697,27 @@ def get_test_dataset(script_file='examples/LJSpeech/data/dev/script_16000/dev_id
     return TestDatasets(script_file)
 
 if __name__ == '__main__':
-    hp.configure('configs/fastSpeech2/hparams_LJ_melgan.py')
-    datasets = get_dataset(hp.train_script)
+    from utils import hparams as hp
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--hp_file', metavar='FILE', default='hparams.py')
+    parser.add_argument('--train_script', default=None)
+    args = parser.parse_args()
 
-    sampler = NumBatchSampler(datasets, 3, shuffle=False)
-    dataloader = DataLoader(datasets, batch_sampler=sampler, num_workers=4, collate_fn=collate_fn)
-
+    hp.configure(args.hp_file)
+    if args.train_script is not None:
+        hp.train_script = args.train_script
+    print(f'train script = {hp.train_script}')
+    datasets = TrainDatasets(hp.train_script, hp)
+    sampler = LengthsBatchSampler(datasets, hp.max_seqlen, hp.lengths_file, shuffle=True, shuffle_one_time=False)
+    dataloader = DataLoader(datasets, batch_sampler=sampler, num_workers=8, collate_fn=collate_fn)
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     from tqdm import tqdm
     pbar = tqdm(dataloader)
-    for dic in pbar:
-        import pdb; pdb.set_trace()
-        print(dic[1])
+    for d in pbar:
+        #text, mel_input, pos_text, pos_mel, text_lengths, mel_lengths = d
+        text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment = d
+        text = text.to(DEVICE, non_blocking=True)
+        mel = mel.to(DEVICE, non_blocking=True)
+        pos_text = pos_text.to(DEVICE, non_blocking=True)
+        pos_mel = pos_mel.to(DEVICE, non_blocking=True)
+        text_lengths = text_lengths.to(DEVICE, non_blocking=True)
