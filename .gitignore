@@ -7,12 +7,16 @@ train_fastspeech2.sh
 src.average_checkpoints
 network.*
 *.wav
+test.sh
+test_slurm.sh
+dev/
+
+train_AlignTTS.py
 # Byte-compiled / optimized / DLL files
 
 __pycache__/
 *.py[cod]
 *$py.class
-
 
 # C extensions
 *.so
