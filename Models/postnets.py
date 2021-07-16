@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+#from Models.variance_predictor import VarianceAdaptor
+
 def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
@@ -11,7 +13,7 @@ class PostConvNet(nn.Module):
     """
     Post Convolutional Network (mel --> mel)
     """
-    def __init__(self, num_hidden, mel_dim, reduction_rate, dropout=0.5, output_type=None, num_group=None):
+    def __init__(self, hp, num_hidden, mel_dim, reduction_rate, dropout=0.5, output_type=None, num_group=None):
         super(PostConvNet, self).__init__()
         self.output_type = output_type
         if output_type:
@@ -32,7 +34,7 @@ class PostConvNet(nn.Module):
             self.out2 = nn.Linear(num_hidden, mel_dim*reduction_rate)
 
         else:
-            # ignore
+            print(mel_dim, reduction_rate)
             self.conv1 = nn.Conv1d(in_channels=mel_dim*reduction_rate,
                                   out_channels=num_hidden,
                                   kernel_size=5,
@@ -47,6 +49,20 @@ class PostConvNet(nn.Module):
                                    padding=4)
 
             self.out = nn.Linear(num_hidden, mel_dim * reduction_rate)
+
+        ## dev
+        #self.pitch_pred = hp.pitch_pred
+        #self.energy_pred = hp.energy_pred
+        #if self.pitch_pred:
+        #    n_bins = 256
+        #    self.pitch_predictor = VariancePredictor(d_model_encoder)
+        #    self.pitch_bins = torch.exp(torch.linspace(np.log(f0_min), np.log(f0_max), n_bins-1
+        #    self.pitch_embedding = nn.Embedding(n_bins, hp.d_model_d)
+        #if self.energy_pred:
+        #    n_bins = 256
+        #    self.energy_predictor = VariancePredictor(d_model_encoder)
+        #    self.energy_bins = torch.linspace(energy_min, energy_max, n_bins-1).to(DEVICE)
+        #    self.energy_embedding = nn.Embedding(n_bins, d_model_encoder)
 
         self.batch_norm_list = clones(nn.BatchNorm1d(num_hidden), 3)
         self.pre_batchnorm = nn.BatchNorm1d(num_hidden)

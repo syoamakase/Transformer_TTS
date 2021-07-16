@@ -27,7 +27,6 @@ def repeat(N, fn):
 
 
 class Decoder(nn.Module):
-    # copy
     def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_decoder, dropout,
                 dropout_prenet=0.5, multi_speaker=False, spk_emb_dim=None, output_type=None):
         super().__init__()
@@ -41,7 +40,6 @@ class Decoder(nn.Module):
         self.layers = repeat(N, lambda: DecoderLayer(d_model, heads, ff_conv_kernel_size, dropout, concat_after_decoder, multi_speaker, spk_emb_dim))
         self.norm = nn.LayerNorm(d_model)
 
-    #@profile
     def forward(self, trg, e_outputs, src_mask, trg_mask, spk_emb=None):
         x = self.decoder_prenet(trg)
         if self.output_type:

@@ -28,8 +28,8 @@ class FastSpeech2(nn.Module):
         CTC_training (bool): the multi task learning with CTC (it is ASR task)
 
     """
-    def __init__(self, src_vocab, trg_vocab, d_model_encoder, N_e, n_head_encoder, ff_conv_kernel_size_encoder, concat_after_encoder,
-                d_model_decoder, N_d, n_head_decoder, ff_conv_kernel_size_decoder, concat_after_decoder, reduction_rate, dropout, CTC_training, 
+    def __init__(self, hp, src_vocab, trg_vocab, d_model_encoder, N_e, n_head_encoder, ff_conv_kernel_size_encoder, concat_after_encoder,
+                d_model_decoder, N_d, n_head_decoder, ff_conv_kernel_size_decoder, concat_after_decoder, reduction_rate, dropout, dropout_postnet, CTC_training, 
                 n_bins, f0_min, f0_max, energy_min, energy_max, pitch_pred=True, energy_pred=True, output_type=None, num_group=None, log_offset=1.,
                 multi_speaker=False, spk_emb_dim=None, spkr_emb=None):
         super().__init__()
@@ -37,16 +37,16 @@ class FastSpeech2(nn.Module):
         if 'encoder' in spkr_emb:
             self.encoder = Encoder(src_vocab, d_model_encoder, N_e, n_head_encoder, ff_conv_kernel_size_encoder, concat_after_encoder, dropout, multi_speaker, spk_emb_dim)
         else:
-            self.encoder = Encoder(src_vocab, d_model_encoder, N_e, n_head_encoder, ff_conv_kernel_size_encoder, concat_after_encoder, dropout=0.0, multi_speaker=False, spk_emb_dim=None)
+            self.encoder = Encoder(src_vocab, d_model_encoder, N_e, n_head_encoder, ff_conv_kernel_size_encoder, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None)
 
         self.variance_adaptor = VarianceAdaptor(d_model_encoder, n_bins, f0_min, f0_max, energy_min, energy_max, log_offset, pitch_pred, energy_pred)
 
         if 'decoder' in spkr_emb:
             self.decoder = Encoder(d_model_encoder, d_model_decoder, N_d, n_head_decoder, ff_conv_kernel_size_decoder, concat_after_decoder, dropout, multi_speaker, spk_emb_dim, embedding=False)
         else:
-            self.decoder = Encoder(d_model_encoder, d_model_decoder, N_d, n_head_decoder, ff_conv_kernel_size_decoder, concat_after_decoder, dropout=0.0, multi_speaker=False, spk_emb_dim=None, embedding=False)
+            self.decoder = Encoder(d_model_encoder, d_model_decoder, N_d, n_head_decoder, ff_conv_kernel_size_decoder, concat_after_decoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=False)
 
-        self.postnet = PostConvNet(d_model_decoder, trg_vocab, reduction_rate, 0.5, output_type, num_group)
+        self.postnet = PostConvNet(hp=hp, num_hidden=d_model_decoder, mel_dim=trg_vocab, reduction_rate=reduction_rate, dropout=dropout_postnet, output_type=output_type, num_group=num_group)
         #self.postnet = PostConvNet(d_model_decoder, trg_vocab, reduction_rate, 0.0, output_type, num_group)
 
     def forward(self, src, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, spkr_emb=None):

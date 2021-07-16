@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Models.layers import EncoderLayer
-from Models.modules import PositionalEncoder
+from Models.layers import EncoderLayer, ConformerEncoderLayer
+from Models.modules import PositionalEncoder, RelativePositionalEncoder
 from Models.prenets import EncoderPreNet
 
 class MultiSequential(torch.nn.Sequential):
@@ -42,3 +42,29 @@ class Encoder(nn.Module):
             x, attn = self.layers[i](x, mask, spkr_emb)
             attns[:,i] = attn.detach()
         return self.norm(x), attns
+
+
+class ConformerEncoder(nn.Module):
+    def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True):
+        super().__init__()
+        if embedding:
+            self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        else:
+            self.embed = nn.Linear(vocab_size, d_model)
+        self.pe = PositionalEncoder(d_model, dropout=dropout)
+        self.N = N
+        self.heads = heads
+        xscale = 1
+        self.pe = RelativePositionalEncoder(d_model, xscale=xscale, dropout=dropout)
+        self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, dropout))
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, src, mask):
+        x = self.embed(src)
+        x, pe = self.pe(x)
+        b, t, _ = x.shape
+        attns_enc = torch.zeros((b, self.N, self.heads, t, t), device=x.device)
+        for i in range(self.N):
+            x, attn_enc = self.layers[i](x, pe, mask)
+            attns_enc[:,i] = attn_enc.detach()
+        return self.norm(x), attns_enc
