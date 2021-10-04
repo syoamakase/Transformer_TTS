@@ -10,6 +10,8 @@ network.*
 test.sh
 test_slurm.sh
 dev/
+send_message.py
+slurm*.out
 
 train_AlignTTS.py
 # Byte-compiled / optimized / DLL files

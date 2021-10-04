@@ -84,7 +84,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment = d
+            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment, accent = d
 
             text = text.to(DEVICE, non_blocking=True)
             mel = mel.to(DEVICE, non_blocking=True)
@@ -99,6 +99,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 f0 = f0.to(DEVICE, non_blocking=True)
             if hp.energy_pred:
                 energy = energy.to(DEVICE, non_blocking=True)
+            if hp.accent_emb:
+                accent = accent.to(DEVICE, non_blocking=True)
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
                 alignment = alignment.to(DEVICE, non_blocking=True)
 
@@ -116,12 +118,12 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if hp.CTC_training:
-                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
+                outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
             else:
                 if hp.model.lower() == 'fastspeech2':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb)
                 elif hp.model.lower() == 'lightspeech':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
                 else:
                     raise AttributeError
 
@@ -258,7 +260,7 @@ def train_epoch(model, optimizer, step, start_epoch, args, hp, rank):
         collate_fn = datasets.collate_fn_vqwav2vec
     else:
         alignment_pred = (hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech')
-        dataset_train = datasets.TrainDatasets(hp.train_script, hp, alignment_pred=alignment_pred, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred)
+        dataset_train = datasets.TrainDatasets(hp.train_script, hp, alignment_pred=alignment_pred, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb)
         collate_fn = datasets.collate_fn
     if hp.batch_size is not None:
         sampler = datasets.NumBatchSampler(dataset_train, hp.batch_size)
@@ -310,6 +312,7 @@ def run_training(rank, args, hp, port=None):
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
                             reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, CTC_training=hp.CTC_training,
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
+                            accent_emb=hp.accent_emb,
                             output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
     # elif hp.model.lower() == 'lightspeech':
     #     model = LightSpeech(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
@@ -353,6 +356,9 @@ def run_training(rank, args, hp, port=None):
         load_dir = hp.loaded_dir
         print('epoch {} loaded'.format(hp.loaded_epoch))
         loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
+        #print('191-200')
+        #loaded_dict = load_model("models.nwork1/checkpoints.FastSpeech2.sps_half.melgan_16kHz_spkid_wopretrain/network.average_epoch191-epoch200")
+
         model.load_state_dict(loaded_dict)
         #if hp.is_flat_start:
         #    step = 1

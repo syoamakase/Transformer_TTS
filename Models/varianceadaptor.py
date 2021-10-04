@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -81,13 +82,14 @@ class VarianceAdaptor(nn.Module):
         else:
             energy_prediction = None
 
+        text_dur_predicted = x
         if self.pitch_pred:
             x = x + pitch_embedding
         if self.energy_pred:
             x = x + energy_embedding
         # x = x + pitch_embedding + energy_embedding
 
-        return x, log_duration_prediction, pitch_prediction, energy_prediction, mel_len, mel_mask   
+        return x, log_duration_prediction, pitch_prediction, energy_prediction, mel_len, mel_mask, text_dur_predicted
 
 class LengthRegulator(nn.Module):
     """ Length Regulator """

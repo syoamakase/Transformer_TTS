@@ -37,7 +37,7 @@ class EncoderLayer(nn.Module):
 
 
 class ConformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, heads, ff_conv_kernel_size, dropout=0.1):
+    def __init__(self, d_model, heads, ff_conv_kernel_size, dropout=0.1, multi_speaker=False, spk_emb_dim=None):
         ## TODO: add ff_conv_kernel_size
         super().__init__()
         self.ff_1 = FeedForwardConformer(d_model, d_ff=d_model*4, dropout=dropout)
@@ -49,6 +49,11 @@ class ConformerEncoderLayer(nn.Module):
         self.dropout_1 = nn.Dropout(dropout)
         self.dropout_2 = nn.Dropout(dropout)
 
+        self.multi_speaker = multi_speaker
+        if self.multi_speaker:
+            self.multi_emb = nn.Embedding(spk_emb_dim, d_model)
+            self.speaker_L_l1_es = nn.Linear(d_model, d_model, bias=False)
+
     def forward(self, x, pe, mask, spkr_emb=None):
         ## TODO: spkr emb
         x = x + 0.5 * self.ff_1(x)
@@ -57,6 +62,11 @@ class ConformerEncoderLayer(nn.Module):
         x, attn_enc_enc = self.attn(x,x,x,pe,mask)
         x = res + self.dropout_1(x)
         x = x + self.conv_module(x)
+
+        if self.multi_speaker:
+            print('enc conf')
+            spkr_embeds_dec = self.multi_emb(spkr_emb)
+            x = x + F.softsign(self.speaker_L_l1_es(spkr_embeds_dec)).unsqueeze(1)
         x = x + self.dropout_2(self.ff_2(x))
         return x, attn_enc_enc
 

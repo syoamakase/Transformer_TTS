@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-#from Models.variance_predictor import VarianceAdaptor
+#from Models.varianoce_predictor import VarianceAdaptor
+from Models.encoder import Encoder
 
 def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
@@ -91,3 +92,38 @@ class PostConvNet(nn.Module):
             input_ = self.conv2(input_)[:, :, :-4]
             input_ = mel_pred + input_
             return mel_pred.transpose(1, 2), input_.transpose(1, 2)
+
+
+class PostLowEnergyv1(nn.Module):
+    def __init__(self, vocab_size, out_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=False):
+        super(PostLowEnergyv1, self).__init__()
+        ##def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True):
+
+        self.encoder = Encoder(vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, embedding=embedding)
+
+        self.out = nn.Linear(d_model, out_size)
+
+    def forward(self, src, src_mask, spkr_emb=None):
+        e_outputs, attn_enc = self.encoder(src, src_mask, spkr_emb)
+
+        outputs = self.out(e_outputs)
+        
+        return outputs
+
+class PostLowEnergyv2(nn.Module):
+    def __init__(self, vocab_size, out_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=False):
+        super(PostLowEnergyv2, self).__init__()
+        ##def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True):
+
+        self.encoder = Encoder(vocab_size + d_model, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, embedding=embedding)
+
+        self.out = nn.Linear(d_model, out_size)
+
+    def forward(self, src, src_mask, variance_adaptor_output, spkr_emb=None):
+        input_ = torch.cat((src, variance_adaptor_output), dim=-1)
+        e_outputs, attn_enc = self.encoder(input_, src_mask, spkr_emb)
+
+        outputs = self.out(e_outputs)
+        
+        return outputs
+

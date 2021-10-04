@@ -1,10 +1,13 @@
 # Transformer_TTS
 
 This repository is Text-to-Speech (TTS) project based on Transformer.
+It includes FastSpeech~2.
+
 
 ## train
 
 `python train.py --hp_file config/hparams_template.py`
+`python train_fastspeech2.py --hp_file config/hparams_template.py`
 
 If you want to check a loss curve, `tensorboard --logdir <save_dir>/logs`
 
@@ -22,5 +25,4 @@ When you generate a speech, please take an average.
 
 `python test.py --load_name <model path>`
 
-# TODO
-- add FastSpeech2
+`python test_fastspeech2.py --load_name <model path>`
