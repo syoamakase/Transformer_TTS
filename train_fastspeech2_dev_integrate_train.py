@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+#-*- coding: utf-8 -*-
 import argparse
 import copy
 import filecmp
@@ -46,21 +46,8 @@ def npeak_mask(size):
     np_mask = Variable(torch.from_numpy(np_mask) == 0).to(DEVICE)
     return np_mask
 
-# TODO: consider fixed lengths mask
-def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0, debug=False):
-    if debug:
-        context_len = 7 # -3 +3
-        src_mask = (src_pos != src_pad).unsqueeze(-2)
-        size = src_pos.size(1)
-        np_mask = np.zeros((1, size, size))#np.eye(size, k=0).astype('uint8')
-        for k in range(-(context_len-1)//2,(context_len-1)//2+1):
-            np_mask[0] += np.eye(size, k=k)
-
-        np_mask = torch.from_numpy(np_mask.astype('uint8') == 1).to(DEVICE)
-        src_mask_fixlen = src_mask & np_mask
-    else:
-        src_mask = (src_pos != src_pad).unsqueeze(-2)
-
+def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0):
+    src_mask = (src_pos != src_pad).unsqueeze(-2)
     if task.lower() == 'fastspeech2' or task.lower() == 'lightspeech':
         trg_mask = (trg_pos != trg_pad).unsqueeze(-2)
     else:
@@ -76,12 +63,11 @@ def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0, deb
             trg_mask = None
     return src_mask, trg_mask
 
-
-def loss_mel(hp, pred, y, channel_wise=False, loss='l1', channel_weight=None):
+def loss_mel(hp, pred, y, channel_wise=False, channel_weight=None, loss='l1'):
     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
     if channel_wise:
         print('channel')
-        loss = hp.channel_weight[0] * F.l1_loss(pred[:,:,:20], y[:, :, :20]) + hp.channel_weight[1] * F.l1_loss(pred[:,:,20:], y[:, :, 20:])
+        loss = channel_weight[0] * F.l1_loss(pred[:,:,:20], y[:, :, :20]) + channel_weight[1] * F.l1_loss(pred[:,:,20:], y[:, :, 20:])
     else:
         loss = F.l1_loss(pred, y)
     
@@ -102,7 +88,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
     #train_sampler = datasets.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
     #dataloader = DataLoader(dataset_train, batch_sampler=train_sampler, num_workers=8, collate_fn=collate_fn_transformer)
-    channel_weight = torch.ones((hp.mel_dim))
     for d in dataloader: 
         if hp.optimizer.lower() != 'radam':
             lr = get_learning_rate(step, hp.d_model_decoder, hp.warmup_factor, hp.warmup_step)
@@ -129,6 +114,9 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
                 alignment = alignment.to(DEVICE, non_blocking=True)
 
+            if hp.different_spk_emb_samespeaker:
+                spk_emb_postprocess = spk_emb_postprocess.to(DEVICE, non_blocking=True)
+
         batch_size = mel.shape[0]
         if hp.reduction_rate > 1:
             mel_input = mel[:,:-hp.reduction_rate:hp.reduction_rate,:]
@@ -138,19 +126,16 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             mel_input = mel[:,:-1,:]
             pos_mel = pos_mel[:,:-1]
 
-        src_mask, trg_mask = create_masks(pos_text, pos_mel, task=hp.model, debug=False)
+        src_mask, trg_mask = create_masks(pos_text, pos_mel, task=hp.model)
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
-            if False: #hp.CTC_training:
-                outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
-            else:
-                if hp.model.lower() == 'fastspeech2':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
-                elif hp.model.lower() == 'lightspeech':
+            if hp.model.lower() == 'fastspeech2':
+                outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec, post_pro_outputs, ctc_outs, mask_frames = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, spkr_emb_post=spk_emb_postprocess)
+            elif hp.model.lower() == 'lightspeech':
                     outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
-                else:
-                    raise AttributeError
+            else:
+                raise AttributeError
 
             #attn_dec_dec = attn_dec_dec.cpu().numpy()
             #attn_enc = attn_enc.cpu().numpy()
@@ -177,23 +162,12 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss = mel_loss + post_mel_loss
             else:
                 if hp.model.lower() == 'fastspeech2':
-                    if hp.channel_wise:
-                        #mel_loss = nn.L1Loss()(outputs_prenet, mel) #loss_mel(hp, outputs_prenet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_prenet, mel)
-                        mel_loss = loss_mel(hp, outputs_prenet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_prenet, mel)
-                        if hp.postnet_pred:
-                            post_mel_loss = loss_mel(hp, outputs_postnet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_postnet, mel)
-                        else:
-                            post_mel_loss = 0.0
-                        #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
-                        loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
-                    else:
-                        mel_loss = nn.L1Loss()(outputs_prenet, mel)
-                        if hp.postnet_pred:
-                            post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
-                            loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
-                        else:
-                            loss = mel_loss
-
+                    mel_loss = nn.L1Loss()(outputs_prenet, mel)
+                    loss = mel_loss
+                    #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
+                    if outputs_postnet is not None:
+                        post_mel_loss = loss_mel(hp, outputs_postnet, mel[:,:,0:80], channel_wise=hp.channel_wise_postnet, channel_weight=hp.channel_weight_postnet) #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
+                        loss += post_mel_loss #+ 0.3 * iter_loss
                 elif hp.model.lower() == 'lightspeech':
                     mel_loss = nn.L1Loss()(outputs_prenet, mel)
                     loss = mel_loss 
@@ -211,13 +185,42 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
                     mel_loss = nn.L1Loss()(outputs_prenet, mel[:,hp.reduction_rate:,:])
                     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-                    post_mel_loss = mel_loss() #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
+                    if outputs_postnet is not None:
+                        post_mel_loss = loss_mel(hp, outputs_postnet, mel[:,:,0:80], channel_wise=hp.channel_wise) #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
                     for result in results_each_layer:
                         result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
                         iter_loss += nn.L1Loss()(result, mel[:,hp.reduction_rate:,:]) / len(results_each_layer)
 
                     print(f'loss_iter = {iter_loss.item()}')
                 print(f'loss_frame_before = {mel_loss.item()}')
+
+            if outputs_postnet is not None:
+                res_outputs = post_pro_outputs + outputs_postnet
+            else:
+                if hp.version == 3:
+                    res_outputs = post_pro_outputs + outputs_prenet
+                elif hp.version == 8:
+                    res_post_pro_outputs, post_pro_outputs = post_pro_outputs
+                    res_outputs = post_pro_outputs + outputs_prenet
+                    import pdb; pdb.set_trace()
+                    semantic_loss = loss_mel(hp, post_pro_outputs, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight)
+                else:
+                    res_outputs = post_pro_outputs
+                
+            #post_pro_loss = nn.L1Loss()(res_outputs, mel[:,:,0:80])
+            post_pro_loss = loss_mel(hp, res_outputs, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight)
+            print(f'loss_post_pro = {post_pro_loss.item()}')
+            loss += post_pro_loss
+
+            if hp.use_cosine_emb_loss:
+                ## TODO: reproduce xvector
+                #emb_loss = F.cosine_embedding_loss(res_outputs.reshape(batch_size, -1), mel.reshape(batch_size, -1), torch.ones(batch_size).to(DEVICE))
+                #emb_loss = F.cosine_embedding_loss(outputs_prenet.reshape(batch_size, -1), mel.reshape(batch_size, -1), torch.ones(batch_size).to(DEVICE))
+                #emb_loss = F.cosine_embedding_loss(outputs_prenet.detach().reshape(batch_size, -1), res_outputs.reshape(batch_size, -1), torch.ones(batch_size).to(DEVICE)*-1)
+                #emb_loss = F.cosine_embedding_loss(outputs_prenet.detach().reshape(batch_size, -1), res_outputs.reshape(batch_size, -1), torch.ones(batch_size).to(DEVICE))
+                emb_loss = F.cosine_embedding_loss(outputs_prenet.reshape(batch_size, -1), res_outputs.reshape(batch_size, -1), torch.ones(batch_size).to(DEVICE))
+                loss += 0.2 * emb_loss
+                print(f'loss_cosine_emb = {emb_loss.item()}')
             
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
                 duration_loss = nn.L1Loss()(log_d_prediction, torch.log(alignment.float() + 1)) # 1 = logoffset
@@ -240,12 +243,13 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss += loss_token
                 print(f'loss_token = {loss_token.item()}')
 
-            if False: #hp.CTC_training:
-                ctc_outputs = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
-                loss_ctc = F.ctc_loss(ctc_outputs, text, mel_lengths_reduction, text_lengths, blank=0)
-                loss += 0.2 * loss_ctc
-                print(f'loss_ctc = {loss_ctc.item()}')
-                #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
+            if hp.layers_ctc_out:
+                for k in range(len(ctc_outs)):
+                    ctc_output = F.log_softmax(ctc_outs[k], dim=2).transpose(0, 1)
+                    loss_ctc = F.ctc_loss(ctc_output, text, mel_lengths, text_lengths, blank=0)
+                    loss += 0.2 * loss_ctc
+                    print(f'loss_ctc = {loss_ctc.item()}')
+                    #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
 
             #writer.add_scalar("Loss/train_post_mel", post_mel_loss, step)
             #writer.add_scalar("Loss/train_pre_mel", mel_loss, step)
@@ -265,7 +269,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             print(f'loss_total = {loss.item()}')
             print(f'batch size = {batch_size}')
             print(f'step {step} / {len(dataloader)}')
-            assert not torch.isnan(loss), 'loss is nan'
             step += 1
             sys.stdout.flush()
 
@@ -351,10 +354,10 @@ def run_training(rank, args, hp, port=None):
                             n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, 
+                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5,
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
                             accent_emb=hp.accent_emb,
-                            output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
+                            output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture, debug=True)
     # elif hp.model.lower() == 'lightspeech':
     #     model = LightSpeech(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
     #                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
@@ -364,6 +367,7 @@ def run_training(rank, args, hp, port=None):
     #                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
     #                         output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
     
+    print(model)
     model.apply(init_weight)
     model.train()
 
@@ -383,7 +387,6 @@ def run_training(rank, args, hp, port=None):
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
 
-    print(model)
     model = model.to(rank)
     if args.n_gpus > 1:
         model = DDP(torch.nn.SyncBatchNorm.convert_sync_batchnorm(model), device_ids=[rank])
@@ -397,11 +400,10 @@ def run_training(rank, args, hp, port=None):
         start_epoch = hp.loaded_epoch
         load_dir = hp.loaded_dir
         print('epoch {} loaded'.format(hp.loaded_epoch))
+        #print("{}".format(os.path.join(load_dir, 'network.average_epoch191-epoch200')))
+        #loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.average_epoch191-epoch200')), map_location=map_location)
         loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
-        #print('191-200')
-        #loaded_dict = load_model("models.nwork1/checkpoints.FastSpeech2.sps_half.melgan_16kHz_spkid_wopretrain/network.average_epoch191-epoch200")
 
-        model.load_state_dict(loaded_dict)
         #if hp.is_flat_start:
         #    step = 1
         #    start_epoch = 0
@@ -431,7 +433,7 @@ if __name__ == '__main__':
     fill_variables(hp)
     log_config(hp)
 
-    assert hp.architecture == 'text-mel', f'invalid architecture {hp.architecture}'
+    assert hp.architecture == 'text-mel-mel', f'invalid architecture {hp.architecture}'
     save_dir = hp.save_dir # save dir name
     os.makedirs(save_dir, exist_ok=True)
     if hp_file != f'{save_dir}/hparams.py':

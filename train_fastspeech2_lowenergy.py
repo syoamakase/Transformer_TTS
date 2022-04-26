@@ -46,21 +46,8 @@ def npeak_mask(size):
     np_mask = Variable(torch.from_numpy(np_mask) == 0).to(DEVICE)
     return np_mask
 
-# TODO: consider fixed lengths mask
-def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0, debug=False):
-    if debug:
-        context_len = 7 # -3 +3
-        src_mask = (src_pos != src_pad).unsqueeze(-2)
-        size = src_pos.size(1)
-        np_mask = np.zeros((1, size, size))#np.eye(size, k=0).astype('uint8')
-        for k in range(-(context_len-1)//2,(context_len-1)//2+1):
-            np_mask[0] += np.eye(size, k=k)
-
-        np_mask = torch.from_numpy(np_mask.astype('uint8') == 1).to(DEVICE)
-        src_mask_fixlen = src_mask & np_mask
-    else:
-        src_mask = (src_pos != src_pad).unsqueeze(-2)
-
+def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0):
+    src_mask = (src_pos != src_pad).unsqueeze(-2)
     if task.lower() == 'fastspeech2' or task.lower() == 'lightspeech':
         trg_mask = (trg_pos != trg_pad).unsqueeze(-2)
     else:
@@ -75,17 +62,6 @@ def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0, deb
         else:
             trg_mask = None
     return src_mask, trg_mask
-
-
-def loss_mel(hp, pred, y, channel_wise=False, loss='l1', channel_weight=None):
-    #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-    if channel_wise:
-        print('channel')
-        loss = hp.channel_weight[0] * F.l1_loss(pred[:,:,:20], y[:, :, :20]) + hp.channel_weight[1] * F.l1_loss(pred[:,:,20:], y[:, :, 20:])
-    else:
-        loss = F.l1_loss(pred, y)
-    
-    return loss
 
 def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
     #if hp.output_type == 'softmax':
@@ -102,14 +78,13 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
     #train_sampler = datasets.DistributedSamplerWrapper(sampler) if args.n_gpus > 1 else sampler
     #dataloader = DataLoader(dataset_train, batch_sampler=train_sampler, num_workers=8, collate_fn=collate_fn_transformer)
-    channel_weight = torch.ones((hp.mel_dim))
     for d in dataloader: 
         if hp.optimizer.lower() != 'radam':
             lr = get_learning_rate(step, hp.d_model_decoder, hp.warmup_factor, hp.warmup_step)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment, accent, gender, spk_emb_postprocess, mel_name = d
+            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment = d
 
             text = text.to(DEVICE, non_blocking=True)
             mel = mel.to(DEVICE, non_blocking=True)
@@ -124,8 +99,6 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 f0 = f0.to(DEVICE, non_blocking=True)
             if hp.energy_pred:
                 energy = energy.to(DEVICE, non_blocking=True)
-            if hp.accent_emb:
-                accent = accent.to(DEVICE, non_blocking=True)
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
                 alignment = alignment.to(DEVICE, non_blocking=True)
 
@@ -138,17 +111,17 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             mel_input = mel[:,:-1,:]
             pos_mel = pos_mel[:,:-1]
 
-        src_mask, trg_mask = create_masks(pos_text, pos_mel, task=hp.model, debug=False)
+        src_mask, trg_mask = create_masks(pos_text, pos_mel, task=hp.model)
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
-            if False: #hp.CTC_training:
-                outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
+            if hp.CTC_training:
+                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
             else:
                 if hp.model.lower() == 'fastspeech2':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
                 elif hp.model.lower() == 'lightspeech':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
                 else:
                     raise AttributeError
 
@@ -172,28 +145,12 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 acc2 = mel[:,:,1].eq(outputs_postnet[:,:,hp.mel_dim:].argmax(2)).sum() / (mel_lengths.sum() * hp.reduction_rate).float()
                 print(f'accuracy_1 = {acc1}')
                 print(f'accuracy_2 = {acc2}')
-                #writer.add_scalar("Acc/accuracy_1", acc1, step)
-                #writer.add_scalar("Acc/accuracy_2", acc2, step)
                 loss = mel_loss + post_mel_loss
             else:
                 if hp.model.lower() == 'fastspeech2':
-                    if hp.channel_wise:
-                        #mel_loss = nn.L1Loss()(outputs_prenet, mel) #loss_mel(hp, outputs_prenet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_prenet, mel)
-                        mel_loss = loss_mel(hp, outputs_prenet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_prenet, mel)
-                        if hp.postnet_pred:
-                            post_mel_loss = loss_mel(hp, outputs_postnet, mel, channel_wise=True, channel_weight=channel_weight) #nn.L1Loss()(outputs_postnet, mel)
-                        else:
-                            post_mel_loss = 0.0
-                        #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
-                        loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
-                    else:
-                        mel_loss = nn.L1Loss()(outputs_prenet, mel)
-                        if hp.postnet_pred:
-                            post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
-                            loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
-                        else:
-                            loss = mel_loss
-
+                    mel_loss = nn.L1Loss()(outputs_prenet, mel)
+                    post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
+                    loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
                 elif hp.model.lower() == 'lightspeech':
                     mel_loss = nn.L1Loss()(outputs_prenet, mel)
                     loss = mel_loss 
@@ -210,8 +167,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                     #        iter_loss += nn.L1Loss()(result[i,:mel_length-1], mel[i,1:mel_length,:]) / len(results_each_layer)
 
                     mel_loss = nn.L1Loss()(outputs_prenet, mel[:,hp.reduction_rate:,:])
-                    #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-                    post_mel_loss = mel_loss() #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
+                    post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
                     for result in results_each_layer:
                         result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
                         iter_loss += nn.L1Loss()(result, mel[:,hp.reduction_rate:,:]) / len(results_each_layer)
@@ -227,12 +183,10 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                     f0_loss = nn.L1Loss()(p_prediction, f0)
                     loss += f0_loss
                     print(f'loss_f0 = {f0_loss.item()}')
-                    #writer.add_scalar("Loss/train_f0", f0_loss, step)
                 if hp.energy_pred:
                     energy_loss = nn.L1Loss()(e_prediction, energy)
                     loss += energy_loss
                     print(f'loss_energy = {energy_loss.item()}')
-                    #writer.add_scalar("Loss/train_energy", energy_loss, step)
                 
                 loss += duration_loss
             else:
@@ -240,32 +194,18 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss += loss_token
                 print(f'loss_token = {loss_token.item()}')
 
-            if False: #hp.CTC_training:
+            if hp.CTC_training:
                 ctc_outputs = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
                 loss_ctc = F.ctc_loss(ctc_outputs, text, mel_lengths_reduction, text_lengths, blank=0)
                 loss += 0.2 * loss_ctc
                 print(f'loss_ctc = {loss_ctc.item()}')
-                #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
 
-            #writer.add_scalar("Loss/train_post_mel", post_mel_loss, step)
-            #writer.add_scalar("Loss/train_pre_mel", mel_loss, step)
-            #writer.add_scalar("Loss/train_all_loss", loss, step)
-            #if step % hp.save_attention_per_step == 0:
-            #    for n in range(hp.n_layer_encoder):
-            #        for head in range(hp.n_head_encoder):
-            #            writer.add_image(f'attn_enc_{n}_{head}', attn_enc[0][n][head], step, dataformats='HW')
-            #    for n in range(hp.n_layer_decoder):
-            #        for head in range(hp.n_head_encoder):
-            #            writer.add_image(f'attn_dec_{n}_{head}', attn_dec_dec[0][n][head], step, dataformats='HW')
-                        #writer.add_image(f'attn_dec_enc_{n}_{head}', attn_dec_enc[0][n][head], step, dataformats='HW')
-            #print('lr = {}'.format(lr))
             if outputs_postnet is not None:
                 print(f'loss_frame_after = {post_mel_loss.item()}')
             
             print(f'loss_total = {loss.item()}')
             print(f'batch size = {batch_size}')
             print(f'step {step} / {len(dataloader)}')
-            assert not torch.isnan(loss), 'loss is nan'
             step += 1
             sys.stdout.flush()
 
@@ -301,7 +241,7 @@ def train_epoch(model, optimizer, step, start_epoch, args, hp, rank):
         collate_fn = datasets.collate_fn_vqwav2vec
     else:
         alignment_pred = (hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech')
-        dataset_train = datasets.TrainDatasets(hp.train_script, hp, alignment_pred=alignment_pred, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb)
+        dataset_train = datasets.TrainDatasets(hp.train_script, hp, alignment_pred=alignment_pred, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred)
         collate_fn = datasets.collate_fn
     if hp.batch_size is not None:
         sampler = datasets.NumBatchSampler(dataset_train, hp.batch_size)
@@ -351,18 +291,9 @@ def run_training(rank, args, hp, port=None):
                             n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, 
+                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, CTC_training=hp.CTC_training,
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
-                            accent_emb=hp.accent_emb,
-                            output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
-    # elif hp.model.lower() == 'lightspeech':
-    #     model = LightSpeech(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-    #                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
-    #                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
-    #                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-    #                         reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, CTC_training=hp.CTC_training,
-    #                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
-    #                         output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
+                            output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
     
     model.apply(init_weight)
     model.train()
@@ -383,7 +314,6 @@ def run_training(rank, args, hp, port=None):
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=max_lr, betas=(0.9, 0.98), eps=1e-9)
 
-    print(model)
     model = model.to(rank)
     if args.n_gpus > 1:
         model = DDP(torch.nn.SyncBatchNorm.convert_sync_batchnorm(model), device_ids=[rank])
@@ -398,9 +328,6 @@ def run_training(rank, args, hp, port=None):
         load_dir = hp.loaded_dir
         print('epoch {} loaded'.format(hp.loaded_epoch))
         loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
-        #print('191-200')
-        #loaded_dict = load_model("models.nwork1/checkpoints.FastSpeech2.sps_half.melgan_16kHz_spkid_wopretrain/network.average_epoch191-epoch200")
-
         model.load_state_dict(loaded_dict)
         #if hp.is_flat_start:
         #    step = 1
@@ -431,7 +358,6 @@ if __name__ == '__main__':
     fill_variables(hp)
     log_config(hp)
 
-    assert hp.architecture == 'text-mel', f'invalid architecture {hp.architecture}'
     save_dir = hp.save_dir # save dir name
     os.makedirs(save_dir, exist_ok=True)
     if hp_file != f'{save_dir}/hparams.py':

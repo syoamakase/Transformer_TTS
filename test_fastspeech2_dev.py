@@ -28,6 +28,8 @@ from utils.utils import log_config, fill_variables
 #from Models.transformer import Transformer
 from Models.fastspeech2 import FastSpeech2
 
+from Models.postnets import PostLowEnergyv1, PostLowEnergyv2
+
 random.seed(77)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -87,10 +89,11 @@ def create_masks(src_pos, trg_pos, src_pad=0, trg_pad=0):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load_name', required=True)
+    parser.add_argument('--load_name_tts', default=None)
     parser.add_argument('--test_script', default=None)
     parser.add_argument('--save', action='store_true')
-    parser.add_argument('--use_prenet', action='store_true')
     args = parser.parse_args()
+    load_name_tts = args.load_name_tts
     load_name = args.load_name
     test_script = args.test_script
 
@@ -103,32 +106,56 @@ if __name__ == '__main__':
     save_path = os.path.join(os.path.dirname(load_name), 'dev/'+epoch)
     os.makedirs(save_path, exist_ok=True)
 
-    assert hp.architecture == 'text-mel', f'invalid architecture {hp.architecture}'
+    assert hp.architecture == 'mel-mel', f'invalid architecture {hp.architecture}'
     if test_script is not None:
         hp.test_script = test_script
 
-    print(f'use_prenet = {args.use_prenet}')
+    if load_name_tts is None:
+        load_name_tts = hp.pretrain_model
 
     # initialize pytorch
-    model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-                        n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+    pretrained_model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
+                        n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder,
+                        concat_after_encoder=hp.ff_conv_kernel_size_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, 
+                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0,
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
-                        pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb,
-                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
+                        pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, 
+                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
 
+    pretrained_model.to(DEVICE)
+    pretrained_model.eval()
+    pretrained_model.load_state_dict(load_model(f"{load_name_tts}"))
+    
+    if hp.version == 1 or hp.version == 5:
+        model = PostLowEnergyv1(vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
+                               heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder,
+                               concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=0.0,
+                               multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker)
+    elif hp.version == 2 or hp.version == 3 or hp.version == 4 or hp.version == 6:
+        print(f'version {hp.version}')
+        spk_emb_dim = hp.spk_emb_dim_postprocess #if hp.spk_emb_postprocess_type is not None else None
+        model = PostLowEnergyv2(hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
+                                heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder,
+                                concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=0.0,
+                                multi_speaker=hp.is_multi_speaker, spk_emb_dim=spk_emb_dim, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb,
+                                concat=hp.concat, spk_emb_postprocess_type=hp.spk_emb_postprocess_type)
+                                #multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spk_emb_layer=[1, 2])
+
+    print('pretrain model')
+    print(pretrained_model)
+    print('post process')
+    print(model) 
     model.to(DEVICE)
     model.eval()
-
     model.load_state_dict(load_model(f"{load_name}"))
-    # To FastSpeech2 dataset 
+    # To FastSpeech2 dataset
     if hp.output_type:
         dataset_test = datasets.VQWav2vecTestDatasets(hp.test_script)
         collate_fn_transformer = datasets.collate_fn_vqwav2vec_test
     else:
-        dataset_test = datasets.TestDatasets(hp.test_script, hp, accent_emb=hp.accent_emb)
+        dataset_test = datasets.TestDatasets(hp.test_script, hp)
         collate_fn_transformer = datasets.collate_fn_test
     sampler = datasets.NumBatchSampler(dataset_test, 1, shuffle=False)#hp.batch_size)
 
@@ -143,7 +170,7 @@ if __name__ == '__main__':
     total_time = 0
     for idx, d in tqdm(enumerate(dataloader)):
         # torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
-        text, mel, pos_text, text_lengths, spk_emb, accent, gender, spk_emb_postprocess = d
+        text, mel, pos_text, text_lengths, spk_emb, accent, gender, xvector = d
 
         text = text.to(DEVICE)
         #mel = mel.to(DEVICE)
@@ -154,32 +181,54 @@ if __name__ == '__main__':
         if spk_emb is not None:
             spk_emb = spk_emb.to(DEVICE)
 
-        if hp.accent_emb:
-            accent = accent.to(DEVICE)
+        if gender is not None:
+            gender = gender.to(DEVICE)
         
+        if xvector is not None:
+            xvector = xvector.to(DEVICE)
+
         src_mask = (pos_text != 0).unsqueeze(-2)
-        local_time = time.time()
         with torch.no_grad():
             local_time = time.time()
-            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec = pretrained_model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+        
+            if hp.postnet_pred:
+                outputs = outputs_postnet
+            else:
+                outputs = outputs_prenet
+            trg_mask = (torch.ones(outputs.shape[0], outputs.shape[1]) != 0).unsqueeze(-2).to(DEVICE)
 
-        if hp.postnet_pred and args.use_prenet is False:
-            outputs = outputs_postnet[0].cpu().detach().numpy()
-        else:
-            outputs = outputs_prenet[0].cpu().detach().numpy()
+            if hp.version == 1 or hp.version == 5:
+                post_outputs = model(outputs, trg_mask)
+            elif hp.version == 2 or hp.version == 3:
+                post_outputs, _, _  = model(outputs, trg_mask, variance_adaptor_output, spkr_emb=xvector, gender=gender)
+            elif hp.version == 4 or hp.version == 6:
+                post_outputs,_, _ = model(outputs, trg_mask, text_dur_predicted)
+
+        outputs =  outputs[0].cpu().detach().numpy()
+        if hp.version <= 2 or hp.version == 4:
+            new_outputs = copy.deepcopy(outputs)
+            new_outputs[:, 0:80] = post_outputs[0].cpu().detach().numpy()
+        elif hp.version == 3 or hp.version == 5 or hp.version == 6:
+            #print('residual')
+            # all dimensions
+            new_net_outputs = post_outputs[0].cpu().detach().numpy()
+            new_outputs = new_net_outputs + outputs
+            
+            # 40:80
+            #final_outputs = outputs_postnet.clone()
+            #final_outputs[:,:,0:20] = post_outputs[:,:,:] + final_outputs[:,:,0:20]
+            #new_outputs = final_outputs.cpu().detach().numpy()[0]
+            #
+
         if hp.var_file is not None:
             outputs *= np.sqrt(var_value)
+            new_outputs *= np.sqrt(var_value)
         if hp.mean_file is not None:
             outputs += mean_value
+            new_outputs += mean_value
+
         total_time += (time.time() - local_time)
-
-        if hp.output_type == 'softmax':
-            pred1 = outputs[:, :512].argmax(1)
-            pred2 = outputs[:, 512:].argmax(1)
-            #import pdb; pdb.set_trace()
-            #outputs = torch.cat((pred1, pred2))
-            outputs = np.vstack((pred1, pred2))
-
         base_name = mel[0]
         if args.save:
             output_name = base_name
@@ -187,11 +236,8 @@ if __name__ == '__main__':
             base_name = os.path.splitext(os.path.basename(mel[0]))[0]
             output_name = os.path.join(save_path, base_name+'.npy')
         #output_name = os.path.join(save_path, str(idx)+'.npy')
-        print(f'save {output_name} {outputs.shape}')
-        # duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-self.log_offset), min=0)
-        duration_rounded = torch.clamp(torch.round(torch.exp(log_d_prediction)-1), min=0)
-        np.save(output_name, outputs)
-        np.save(output_name.replace('.npy', '_alignment.npy'), duration_rounded.cpu().numpy()[0])
+        #print(f'save {output_name} {outputs.shape}')
+        np.save(output_name, new_outputs)
         sys.stdout.flush()
     print(f'elapsed time = {time.time() - start_time}')
-    print(f'total_time = {total_time}')
+    print(f'total time = {total_time}')

@@ -89,7 +89,6 @@ if __name__ == '__main__':
     parser.add_argument('--load_name', required=True)
     parser.add_argument('--test_script', default=None)
     parser.add_argument('--save', action='store_true')
-    parser.add_argument('--use_prenet', action='store_true')
     args = parser.parse_args()
     load_name = args.load_name
     test_script = args.test_script
@@ -103,11 +102,9 @@ if __name__ == '__main__':
     save_path = os.path.join(os.path.dirname(load_name), 'dev/'+epoch)
     os.makedirs(save_path, exist_ok=True)
 
-    assert hp.architecture == 'text-mel', f'invalid architecture {hp.architecture}'
+    assert hp.architecture == 'text-mel-mel', f'invalid architecture {hp.architecture}'
     if test_script is not None:
         hp.test_script = test_script
-
-    print(f'use_prenet = {args.use_prenet}')
 
     # initialize pytorch
     model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
@@ -117,8 +114,9 @@ if __name__ == '__main__':
                         reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, 
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
                         pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb,
-                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
+                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture, debug=True)
 
+    print(model)
     model.to(DEVICE)
     model.eval()
 
@@ -143,7 +141,7 @@ if __name__ == '__main__':
     total_time = 0
     for idx, d in tqdm(enumerate(dataloader)):
         # torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
-        text, mel, pos_text, text_lengths, spk_emb, accent, gender, spk_emb_postprocess = d
+        text, mel, pos_text, text_lengths, spk_emb, accent, gender, xvector = d
 
         text = text.to(DEVICE)
         #mel = mel.to(DEVICE)
@@ -156,22 +154,33 @@ if __name__ == '__main__':
 
         if hp.accent_emb:
             accent = accent.to(DEVICE)
+
+        if xvector is not None:
+            xvector = xvector.to(DEVICE)
         
         src_mask = (pos_text != 0).unsqueeze(-2)
         local_time = time.time()
         with torch.no_grad():
             local_time = time.time()
-            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
-
-        if hp.postnet_pred and args.use_prenet is False:
-            outputs = outputs_postnet[0].cpu().detach().numpy()
+            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, spkr_emb_post=xvector)
+        
+        if hp.postnet_pred:
+            res_outputs = outputs_pro_post + outputs_postnet
         else:
-            outputs = outputs_prenet[0].cpu().detach().numpy()
+            assert outputs_postnet is None
+            res_outputs = outputs_pro_post + outputs_prenet
+        outputs = res_outputs[0].cpu().detach().numpy()
         if hp.var_file is not None:
             outputs *= np.sqrt(var_value)
         if hp.mean_file is not None:
             outputs += mean_value
-        total_time += (time.time() - local_time)
+
+        outputs_prenet = outputs_prenet[0].cpu().detach().numpy()
+        if hp.var_file is not None:
+            outputs_prenet *= np.sqrt(var_value)
+        if hp.mean_file is not None:
+            outputs_prenet += mean_value
+
 
         if hp.output_type == 'softmax':
             pred1 = outputs[:, :512].argmax(1)
@@ -186,12 +195,15 @@ if __name__ == '__main__':
         else:
             base_name = os.path.splitext(os.path.basename(mel[0]))[0]
             output_name = os.path.join(save_path, base_name+'.npy')
+            output_name_prenet = os.path.join(save_path, base_name+'_prenet.npy')
+            np.save(output_name_prenet, outputs_prenet)
         #output_name = os.path.join(save_path, str(idx)+'.npy')
         print(f'save {output_name} {outputs.shape}')
         # duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-self.log_offset), min=0)
         duration_rounded = torch.clamp(torch.round(torch.exp(log_d_prediction)-1), min=0)
         np.save(output_name, outputs)
-        np.save(output_name.replace('.npy', '_alignment.npy'), duration_rounded.cpu().numpy()[0])
+        total_time += (time.time() - local_time)
+        #np.save(output_name.replace('.npy', '_alignment.npy'), duration_rounded.cpu().numpy()[0])
         sys.stdout.flush()
     print(f'elapsed time = {time.time() - start_time}')
     print(f'total_time = {total_time}')
