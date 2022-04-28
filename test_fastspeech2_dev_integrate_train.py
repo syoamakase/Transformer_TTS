@@ -165,6 +165,8 @@ if __name__ == '__main__':
             outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, spkr_emb_post=xvector)
         
         if hp.postnet_pred:
+            if hp.version == 8:
+                outputs_pro_post = outputs_pro_post[0]
             res_outputs = outputs_pro_post + outputs_postnet
         else:
             assert outputs_postnet is None
