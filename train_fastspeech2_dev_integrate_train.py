@@ -63,13 +63,14 @@ def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0):
             trg_mask = None
     return src_mask, trg_mask
 
-def loss_mel(hp, pred, y, channel_wise=False, channel_weight=None, loss='l1'):
+def loss_mel(hp, pred, y, channel_wise=False, channel_weight=None, time_weight=None, loss='l1'):
     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
     if channel_wise:
-        print('channel')
         loss = channel_weight[0] * F.l1_loss(pred[:,:,:20], y[:, :, :20]) + channel_weight[1] * F.l1_loss(pred[:,:,20:], y[:, :, 20:])
     else:
         loss = F.l1_loss(pred, y)
+    if time_weight is not None:
+        loss = (F.l1_loss(pred[:,:,:], y[:, :, :], reduction='none') * time_weight).sum() / time_weight.sum() / hp.mel_dim
     
     return loss
 
@@ -200,10 +201,11 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 if hp.version == 3:
                     res_outputs = post_pro_outputs + outputs_prenet
                 elif hp.version == 8:
-                    res_post_pro_outputs, post_pro_outputs = post_pro_outputs
-                    res_outputs = post_pro_outputs + outputs_prenet
-                    import pdb; pdb.set_trace()
-                    semantic_loss = loss_mel(hp, post_pro_outputs, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight)
+                    post_pro_outputs_res, post_pro_outputs_replace = post_pro_outputs
+                    res_outputs = post_pro_outputs_res + outputs_prenet
+                    semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight, time_weight=mask_frames)
+                    print(f'semantic_replace_loss = {semantic_loss}')
+                    loss += semantic_loss
                 else:
                     res_outputs = post_pro_outputs
                 
