@@ -63,14 +63,17 @@ def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0):
             trg_mask = None
     return src_mask, trg_mask
 
-def loss_mel(hp, pred, y, channel_wise=False, channel_weight=None, time_weight=None, loss='l1'):
+def loss_mel(hp, pred, y, channel_wise=False, channel_weight=None, time_mask=None, time_weight=None, loss='l1'):
     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
     if channel_wise:
         loss = channel_weight[0] * F.l1_loss(pred[:,:,:20], y[:, :, :20]) + channel_weight[1] * F.l1_loss(pred[:,:,20:], y[:, :, 20:])
     else:
         loss = F.l1_loss(pred, y)
-    if time_weight is not None:
-        loss = (F.l1_loss(pred[:,:,:], y[:, :, :], reduction='none') * time_weight).sum() / time_weight.sum() / hp.mel_dim
+    if time_mask is not None:
+        loss_mask = (F.l1_loss(pred[:,:,:], y[:, :, :], reduction='none') * time_mask).sum() / time_mask.sum() / hp.mel_dim
+        loss_unmask = (F.l1_loss(pred[:,:,:], y[:, :, :], reduction='none') * (~time_mask)).sum() / (~time_mask).sum() / hp.mel_dim
+        loss = time_weight[0] * loss_mask + time_weight[1] * loss_unmask
+        #loss_mask = F.l1_loss(pred[:,:,:], y[:, :, :])
     
     return loss
 
@@ -200,10 +203,10 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             else:
                 if hp.version == 3:
                     res_outputs = post_pro_outputs + outputs_prenet
-                elif hp.version == 8:
+                elif hp.version == 8 or hp.version == 9:
                     post_pro_outputs_res, post_pro_outputs_replace = post_pro_outputs
                     res_outputs = post_pro_outputs_res + outputs_prenet
-                    semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight, time_weight=mask_frames)
+                    semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight, time_mask=mask_frames, time_weight=hp.time_weight)
                     print(f'semantic_replace_loss = {semantic_loss}')
                     loss += semantic_loss
                 else:
@@ -273,6 +276,9 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             print(f'step {step} / {len(dataloader)}')
             step += 1
             sys.stdout.flush()
+            if torch.isnan(loss):
+                print('loss is nan.')
+                sys.exit(1)
 
             if hp.amp:
                 scaler.scale(loss).backward()

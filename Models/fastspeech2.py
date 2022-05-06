@@ -84,7 +84,7 @@ class FastSpeech2(nn.Module):
                                     heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=hp.dropout,
                                     multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb, concat=hp.concat,spk_emb_postprocess_type=hp.spk_emb_postprocess_type,
                                     layers_ctc_out=hp.layers_ctc_out)
-            if self.hp.version == 8:
+            if self.hp.version == 8 or self.hp.version == 9:
                 self.post_model_replace_mask = PostLowEnergyv2(hp=hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_post_model,
                                     heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=hp.dropout,
                                     multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb,
@@ -154,10 +154,21 @@ class FastSpeech2(nn.Module):
                 phone_feature = variance_adaptor_output
                 mask_frames = None
 
-            outputs_pro_post, ctc_outs, _ = self.post_model(outputs_prenet, mel_mask, variance_adaptor_output, spkr_emb=spkr_emb_post)
             if self.hp.version == 8:
-                outputs_pro_post_replace, ctc_outs, _ = self.post_model(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
+                outputs_pro_post, ctc_outs, _ = self.post_model(outputs_prenet, mel_mask, variance_adaptor_output, spkr_emb=spkr_emb_post)
+                outputs_pro_post_replace, ctc_outs, _ = self.post_model_replace_mask(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
                 outputs_pro_post = (outputs_pro_post, outputs_pro_post_replace)
+            elif self.hp.version == 9:
+                outputs_pro_post, ctc_outs, _ = self.post_model(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
+                outputs_pro_post_replace, ctc_outs, _ = self.post_model_replace_mask(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
+                outputs_pro_post = (outputs_pro_post, outputs_pro_post_replace)
+            elif self.hp.version == 10:
+                ## TODO
+                outputs_pro_post, outputs_pro_post_replace, ctc_outs, _ = self.post_model(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
+                outputs_pro_post = (outputs_pro_post, outputs_pro_post_replace)
+            else:
+                outputs_pro_post, ctc_outs, _ = self.post_model(input_meltomel, mel_mask, phone_feature, spkr_emb=spkr_emb_post)
+            
             # outputs, ctc_out, diff
             if self.training:
                 return outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post, ctc_outs, mask_frames
