@@ -116,13 +116,13 @@ if __name__ == '__main__':
     # initialize pytorch
     pretrained_model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder,
-                        concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+                        concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
                         reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0,
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
                         pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, 
-                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spkr_emb=hp.spkr_emb)
+                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spkr_emb_architecture)
 
     pretrained_model.to(DEVICE)
     pretrained_model.eval()
@@ -131,15 +131,15 @@ if __name__ == '__main__':
     if hp.version == 1 or hp.version == 5:
         model = PostLowEnergyv1(vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
                                heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder,
-                               concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=0.0,
+                               concat_after_encoder=hp.concat_after_encoder, dropout=0.0,
                                multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker)
     elif hp.version == 2 or hp.version == 3 or hp.version == 4 or hp.version == 6:
         print(f'version {hp.version}')
         spk_emb_dim = hp.spk_emb_dim_postprocess #if hp.spk_emb_postprocess_type is not None else None
         model = PostLowEnergyv2(hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
                                 heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder,
-                                concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=0.0,
-                                multi_speaker=hp.is_multi_speaker, spk_emb_dim=spk_emb_dim, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb,
+                                concat_after_encoder=hp.concat_after_encoder, dropout=0.0,
+                                multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb,
                                 concat=hp.concat, spk_emb_postprocess_type=hp.spk_emb_postprocess_type)
                                 #multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spk_emb_layer=[1, 2])
 
@@ -168,7 +168,8 @@ if __name__ == '__main__':
     start_time = time.time()
     from tqdm import tqdm
     total_time = 0
-    for idx, d in tqdm(enumerate(dataloader)):
+    #for idx, d in tqdm(enumerate(dataloader)):
+    for idx, d in enumerate(dataloader):
         # torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
         text, mel, pos_text, text_lengths, spk_emb, accent, gender, xvector = d
 
@@ -236,7 +237,7 @@ if __name__ == '__main__':
             base_name = os.path.splitext(os.path.basename(mel[0]))[0]
             output_name = os.path.join(save_path, base_name+'.npy')
         #output_name = os.path.join(save_path, str(idx)+'.npy')
-        #print(f'save {output_name} {outputs.shape}')
+        print(f'save {output_name} {outputs.shape}')
         np.save(output_name, new_outputs)
         sys.stdout.flush()
     print(f'elapsed time = {time.time() - start_time}')

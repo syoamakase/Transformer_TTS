@@ -138,32 +138,43 @@ def train_loop(model, optimizer, pretrained_model, step, epoch, args, hp, rank, 
 
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             with torch.no_grad():
-                if hp.CTC_training:
-                    outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = pretrained_model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
+                #if hp.CTC_training:
+                #    outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = pretrained_model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
+                #else:
+                if hp.model.lower() == 'fastspeech2':
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = pretrained_model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
                 else:
-                    if hp.model.lower() == 'fastspeech2':
-                        outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = pretrained_model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
-                    else:
-                        raise AttributeError
+                    raise AttributeError
 
             ## Mask
             if hp.postnet_pred:
-                input_postprocess = outputs_postnet
+                input_meltomel = outputs_postnet
             else:
-                input_postprocess = outputs_prenet
+                input_meltomel = outputs_prenet
 
-            if hp.mask:
-                input_postprocess = spec_augment(input_postprocess, T=50, F=20, num_T=2, num_F=2)
+            if hp.semantic_mask:
+                if hp.semantic_mask_phone:
+                    mask_phone_feature = variance_adaptor_output
+                else:
+                    mask_phone_feature = None
+                input_meltomel, mask_phone_feature, mask_frames = pretrained_model._semantic_mask(input_meltomel, alignment, mask_phone_feature, p=hp.mask_probability)
+                phone_feature = variance_adaptor_output if mask_phone_feature is None else mask_phone_feature
+            else:
+                phone_feature = variance_adaptor_output
+                mask_frames = None
+
+            #if hp.mask:
+            #    input_postprocess = spec_augment(input_postprocess, T=50, F=20, num_T=2, num_F=2)
 
             ## train new model for low-energy parts
             if hp.version == 1 or hp.version == 5:
-                outputs = model(input_postprocess, trg_mask)
+                outputs = model(input_meltomel, trg_mask)
             elif hp.version == 2 or hp.version == 3 or hp.version == 7:
-                outputs, ctc_outputs, diff = model(input_postprocess, trg_mask, variance_adaptor_output, spkr_emb=spk_emb_postprocess, gender=gender)
+                outputs, ctc_outputs, diff = model(input_meltomel, trg_mask, phone_feature, spkr_emb=spk_emb_postprocess, gender=gender)
                 #outputs = model(outputs_postnet, trg_mask, variance_adaptor_output)
             elif hp.version == 4 or hp.version == 6:
                 print('text_dur')
-                outputs, ctc_outputs, diff = model(input_postprocess, trg_mask, text_dur_predicted)
+                outputs, ctc_outputs, diff = model(input_meltomel, trg_mask, text_dur_predicted)
 
             loss = 0.0
             if hp.model.lower() == 'fastspeech2':
@@ -301,22 +312,22 @@ def run_training(rank, args, hp, port=None):
 
     if hp.model.lower() == 'fastspeech2':
         pretrained_model = FastSpeech2(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-                            n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+                            n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
                             reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, 
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
-                            accent_emb=hp.accent_emb, output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spkr_emb_architecture)
+                            accent_emb=hp.accent_emb, output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
 
         if hp.version == 1 or hp.version == 5:
             print(f'version {hp.version}')
             model = PostLowEnergyv1(vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
-                                    heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=hp.dropout,
+                                    heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_post, dropout=hp.dropout,
                                     multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker)
         elif hp.version == 2 or hp.version == 3 or hp.version == 4 or hp.version == 6 or hp.version == 7:
             print(f'version {hp.version}')
             model = PostLowEnergyv2(hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
-                                    heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder, dropout=hp.dropout,
+                                    heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_post, dropout=hp.dropout,
                                     multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb, concat=hp.concat,spk_emb_postprocess_type=hp.spk_emb_postprocess_type)
                                     #multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spk_emb_layer=[1, 2, 3, 4])
 

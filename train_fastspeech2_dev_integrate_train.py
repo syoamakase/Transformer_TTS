@@ -120,6 +120,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
             if hp.different_spk_emb_samespeaker:
                 spk_emb_postprocess = spk_emb_postprocess.to(DEVICE, non_blocking=True)
+            #else:
+            #    spk_emb_postprocess = spk_emb = spk_emb.to(DEVICE, non_blocking=True)
 
         batch_size = mel.shape[0]
         if hp.reduction_rate > 1:
@@ -135,6 +137,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
 
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if hp.model.lower() == 'fastspeech2':
+                if (not hp.different_spk_emb_samespeaker) and (hp.spk_emb_postprocess_type is not None):
+                    spkr_emb_post = spkr_emb
                 outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec, post_pro_outputs, ctc_outs, mask_frames = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, spkr_emb_post=spk_emb_postprocess)
             elif hp.model.lower() == 'lightspeech':
                     outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
@@ -203,12 +207,17 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             else:
                 if hp.version == 3:
                     res_outputs = post_pro_outputs + outputs_prenet
-                elif hp.version == 8 or hp.version == 9:
+                elif hp.version == 8 or hp.version == 9 or hp.version == 10:
                     post_pro_outputs_res, post_pro_outputs_replace = post_pro_outputs
                     res_outputs = post_pro_outputs_res + outputs_prenet
-                    semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight, time_mask=mask_frames, time_weight=hp.time_weight)
-                    print(f'semantic_replace_loss = {semantic_loss}')
-                    loss += semantic_loss
+                    if hp.use_semantic_loss:
+                        semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight, time_mask=mask_frames, time_weight=hp.time_weight)
+                        print(f'semantic_replace_loss = {semantic_loss}')
+                        loss += semantic_loss
+                    else:
+                        semantic_loss = loss_mel(hp, post_pro_outputs_replace, mel[:,:,0:80], channel_wise=hp.channel_wise, channel_weight=hp.channel_weight)
+                        print(f'replace_loss = {semantic_loss}')
+                        loss += semantic_loss
                 else:
                     res_outputs = post_pro_outputs
                 
@@ -248,13 +257,13 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss += loss_token
                 print(f'loss_token = {loss_token.item()}')
 
-            if hp.layers_ctc_out:
-                for k in range(len(ctc_outs)):
-                    ctc_output = F.log_softmax(ctc_outs[k], dim=2).transpose(0, 1)
-                    loss_ctc = F.ctc_loss(ctc_output, text, mel_lengths, text_lengths, blank=0)
-                    loss += 0.2 * loss_ctc
-                    print(f'loss_ctc = {loss_ctc.item()}')
-                    #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
+            #if hp.layers_ctc_out:
+            #    for k in range(len(ctc_outs)):
+            #        ctc_output = F.log_softmax(ctc_outs[k], dim=2).transpose(0, 1)
+            #        loss_ctc = F.ctc_loss(ctc_output, text, mel_lengths, text_lengths, blank=0)
+            #        loss += 0.2 * loss_ctc
+            #        print(f'loss_ctc = {loss_ctc.item()}')
+            #        #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
 
             #writer.add_scalar("Loss/train_post_mel", post_mel_loss, step)
             #writer.add_scalar("Loss/train_pre_mel", mel_loss, step)
@@ -359,7 +368,7 @@ def run_training(rank, args, hp, port=None):
 
     if hp.model.lower() == 'fastspeech2':
         model = FastSpeech2(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-                            n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+                            n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
                             reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5,
@@ -412,6 +421,7 @@ def run_training(rank, args, hp, port=None):
         #loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.average_epoch191-epoch200')), map_location=map_location)
         loaded_dict = load_model("{}".format(os.path.join(load_dir, 'network.epoch{}'.format(hp.loaded_epoch))), map_location=map_location)
 
+        model.load_state_dict(loaded_dict)
         #if hp.is_flat_start:
         #    step = 1
         #    start_epoch = 0

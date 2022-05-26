@@ -108,7 +108,7 @@ if __name__ == '__main__':
 
     # initialize pytorch
     model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-                        n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+                        n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
                         reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, 
@@ -162,14 +162,14 @@ if __name__ == '__main__':
         local_time = time.time()
         with torch.no_grad():
             local_time = time.time()
-            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, spkr_emb_post=xvector)
+            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post, ctc_outs, mask_frames = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, spkr_emb_post=xvector)
         
         if hp.postnet_pred:
-            if hp.version == 8:
-                outputs_pro_post = outputs_pro_post[0]
             res_outputs = outputs_pro_post + outputs_postnet
         else:
             assert outputs_postnet is None
+            if hp.version == 8 or hp.version == 9 or hp.version == 10:
+                outputs_pro_post = outputs_pro_post[0]
             res_outputs = outputs_pro_post + outputs_prenet
         outputs = res_outputs[0].cpu().detach().numpy()
         if hp.var_file is not None:
