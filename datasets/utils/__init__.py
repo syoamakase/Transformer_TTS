@@ -16,8 +16,6 @@ class __HParams:
         print(item)
         if not self.is_configured():
             raise AttributeError("HParams not configured yet. Call self.configure()")
-        elif not hasattr(super(), item):
-            raise AttributeError(f'HParams does not have "{item}"')
         else:
             return super().__getattr__(item)
 

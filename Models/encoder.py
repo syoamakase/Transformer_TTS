@@ -22,20 +22,34 @@ def repeat_spkr_emb(N, fn1, fn2, layer):
     tmp = []
     for i in range(N):
         if i in layer:
-            print('speaker_layer')
+            print('kernel 5')
             tmp.append(fn2())
-        else:   
+        else:
             tmp.append(fn1())
     return MultiSequential(*tmp)
 
 class Encoder(nn.Module):
-    def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True, accent_emb=False, spk_emb_layer=None, gender_emb=False, layers_ctc_out=None):
+    def __init__(self,
+                 vocab_size,
+                 d_model,
+                 N,
+                 heads,
+                 ff_conv_kernel_size,
+                 concat_after_encoder,
+                 dropout,
+                 multi_speaker=False,
+                 spk_emb_dim=None,
+                 embedding=True,
+                 accent_emb=False, 
+                 spk_emb_layer=None,
+                 gender_emb=False,
+                 intermediate_layers_out=None):
         super().__init__()
         self.N = N
         self.heads = heads
         self.accent_emb_flag = accent_emb
         self.gender_emb_flag = gender_emb
-        self.layers_ctc_out = layers_ctc_out
+        self.intermediate_layers_out = intermediate_layers_out
 
         if embedding:
             self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0)
@@ -43,7 +57,7 @@ class Encoder(nn.Module):
             self.embed = nn.Linear(vocab_size, d_model)
 
         if accent_emb:
-            self.acc_embed = nn.Embedding(12, d_model)
+            self.acc_embed = nn.Embedding(13, d_model)
 
         if gender_emb:
             self.gender_embed = nn.Embedding(2, d_model)
@@ -51,68 +65,89 @@ class Encoder(nn.Module):
         self.pe = PositionalEncoder(d_model, dropout=dropout)
         if spk_emb_layer is None:
             self.layers = repeat(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim))
-        else:
-            if version == 1:
-                self.layers = repeat_spkr_emb(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder),
-                lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim), spk_emb_layer)
-            else:
-                self.layers = repeat_spkr_emb(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder),
-                lambda: EncoderLayer_v2(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim), spk_emb_layer)
+            # self.layers = repeat_spkr_emb(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim),
+            #                              lambda: EncoderLayer(d_model, heads, 5, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim), layer=[6,7,8,9,10,11])
+        #else:
+        #    if version == 1:
+        #        self.layers = repeat_spkr_emb(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder),
+        #        lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim), spk_emb_layer)
+        #    else:
+        #        self.layers = repeat_spkr_emb(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder),
+        #        lambda: EncoderLayer_v2(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim), spk_emb_layer)
         self.norm = nn.LayerNorm(d_model)
 
-        if self.layers_ctc_out:
-            self.ctc_out_layers = nn.ModuleList([nn.Linear(d_model, 152) for n in range(len(self.layers_ctc_out))])
+        if self.intermediate_layers_out:
+            self.intermediate_layers = nn.ModuleList([nn.Linear(d_model, 80) for n in range(len(self.intermediate_layers_out))])
 
-    def forward(self, src, mask, spkr_emb=None, accent=None, gender_id=None):
+    def forward(self, src, mask, spkr_emb=None, accent=None, gender_id=None, attn_detach=True):
         x = self.embed(src)
-        if self.accent_emb_flag:
-            accent_emb = self.acc_embed(accent)
-            x = x + accent_emb
+        # if self.accent_emb_flag:
+        #     accent_emb = self.acc_embed(accent)
+        #     x = x + accent_emb
 
-        if self.gender_emb_flag:
-            assert gender_id is not None, "gender_id is None"
-            gender_emb = self.gender_emb(gender_id)
-            x = x + gender_emb
+        # if self.gender_emb_flag:
+        #     assert gender_id is not None, "gender_id is None"
+        #     gender_emb = self.gender_emb(gender_id)
+        #     x = x + gender_emb
 
         x = self.pe(x)
-        ctc_outs = []
+        intermediate_outs = []
         b, t, _ = x.shape
         attns = torch.zeros((b, self.N, self.heads, t, t), device=x.device)
         for i in range(self.N):
             x, attn = self.layers[i](x, mask, spkr_emb)
-            if self.layers_ctc_out:
-                if i in self.layers_ctc_out:
-                    i_ctc = len(ctc_outs)
-                    ctc_out = self.ctc_out_layers[i_ctc](x)
-                    ctc_outs.append(ctc_out)
-            attns[:,i] = attn.detach()
-        if self.layers_ctc_out:
-            return self.norm(x), attns, ctc_outs
+            if self.intermediate_layers_out is not None:
+                if i in self.intermediate_layers_out:
+                    i_intermediate = len(intermediate_outs)
+                    intermediate_out = self.intermediate_layers[i_intermediate](x)
+                    intermediate_outs.append(intermediate_out)
+            attns[:, i] = attn if attn_detach else attn.detach()
+        if self.accent_emb_flag:
+            accent_emb = self.acc_embed(accent)
+            x = x + accent_emb
+        if len(intermediate_outs) > 0:
+            return self.norm(x), attns, intermediate_outs
         else:
             return self.norm(x), attns
 
 
 class ConformerEncoder(nn.Module):
-    def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True, accent_emb=False):
+    def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True, accent_emb=False, spk_emb_layer=None, gender_emb=False, intermediate_layers_out=None):
+        """ATTENTION!: the architecture is slightly different from ASR one.
+
+        Args:
+            vocab_size (_type_): _description_
+            d_model (_type_): _description_
+            N (_type_): _description_
+            heads (_type_): _description_
+            dropout (_type_): _description_
+            multi_speaker (bool, optional): _description_. Defaults to False.
+            spk_emb_dim (_type_, optional): _description_. Defaults to None.
+            embedding (bool, optional): _description_. Defaults to True.
+            accent_emb (bool, optional): _description_. Defaults to False.
+        """
         super().__init__()
         self.accent_emb_flag = accent_emb
-        if accent_emb:
-            self.acc_embed = nn.Embedding(12, d_model, padding_idx=0)
         if embedding:
             self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0)
         else:
             self.embed = nn.Linear(vocab_size, d_model)
+
+        if accent_emb:
+            self.acc_embed = nn.Embedding(13, d_model)
+
         self.N = N
         self.heads = heads
         xscale = 1
         self.pe = RelativePositionalEncoder(d_model, xscale=xscale, dropout=dropout)
-        self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, dropout, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim))
+        self.layers = repeat(self.N, lambda: ConformerEncoderLayer(d_model, self.heads, ff_conv_kernel_size=ff_conv_kernel_size, dropout=dropout,  multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim))
         self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, src, mask, spkr_emb=None, accent=None):
+    def forward(self, src, mask, spkr_emb=None, accent=None, attn_detach=True):
         x = self.embed(src)
         if self.accent_emb_flag:
             accent_emb = self.acc_embed(accent)
+
             x = x + accent_emb
 
         x, pe = self.pe(x)
@@ -120,7 +155,7 @@ class ConformerEncoder(nn.Module):
         attns_enc = torch.zeros((b, self.N, self.heads, t, t), device=x.device)
         for i in range(self.N):
             x, attn_enc = self.layers[i](x, pe, mask, spkr_emb)
-            attns_enc[:,i] = attn_enc.detach()
+            attns_enc[:,i] = attn_enc if attn_detach else attn_enc.detach()
         return self.norm(x), attns_enc
 
 class EncoderPostprocessing(nn.Module):
@@ -154,7 +189,7 @@ class EncoderPostprocessing(nn.Module):
         self.layers = repeat(N, lambda: EncoderLayer(d_model, heads, ff_conv_kernel_size, dropout=dropout, concat_after=concat_after_encoder, multi_speaker=multi_speaker, spk_emb_dim=spk_emb_dim))
         self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, src, mask, spkr_emb=None, accent=None, gender=None):
+    def forward(self, src, mask, spkr_emb=None, accent=None, gender=None, attn_detach=True):
         x = self.embed(src)
         if self.accent_emb_flag:
             accent_emb = self.acc_embed(accent)
@@ -182,5 +217,5 @@ class EncoderPostprocessing(nn.Module):
                 ctc_out = self.ctc_linear(x)
             else:
                 ctc_out = None
-            attns[:,i] = attn.detach()
+            attns[:,i] = attn if attn_detach else attn.detach()
         return self.norm(x), ctc_out, attns

@@ -94,7 +94,7 @@ def train_loop(model, optimizer, pretrained_model, step, epoch, args, hp, rank, 
     loss_fastspeech2_sum = torch.zeros((80))
     batch_sum = 0
     iter_sum = 0
-    for d in dataloader: 
+    for d in dataloader:
         if hp.optimizer.lower() != 'radam':
             lr = get_learning_rate(step, hp.d_model_decoder, hp.warmup_factor, hp.warmup_step)
             for param_group in optimizer.param_groups:
@@ -142,7 +142,7 @@ def train_loop(model, optimizer, pretrained_model, step, epoch, args, hp, rank, 
                 #    outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = pretrained_model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
                 #else:
                 if hp.model.lower() == 'fastspeech2':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = pretrained_model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec, _, _, _, _, _ = pretrained_model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb)
                 else:
                     raise AttributeError
 
@@ -315,7 +315,7 @@ def run_training(rank, args, hp, port=None):
                             n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                             ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, 
+                            reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5,  dropout_variance_adaptor=hp.dropout_variance_adaptor,
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
                             accent_emb=hp.accent_emb, output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
 

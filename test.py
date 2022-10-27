@@ -18,7 +18,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 
 from tqdm import tqdm
-import datasets
+from datasets import datasets_transformer
 from torch.utils.data import DataLoader
 
 from utils import hparams as hp
@@ -44,7 +44,7 @@ def load_model(model_file):
     elif is_multi_loaded is False and is_multi_loading is True:
         new_model_state = {}
         for key in model_state.keys():
-            new_model_state['module.'+key] = model_state[key]
+            new_model_state['module.' + key] = model_state[key]
 
         return new_model_state
 
@@ -86,6 +86,7 @@ def create_masks(src_pos, trg_pos, src_pad=0, trg_pad=0):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--load_name', required=True)
+    parser.add_argument('--test_script', default=None)
     args = parser.parse_args()
     load_name = args.load_name
 
@@ -93,25 +94,31 @@ if __name__ == '__main__':
         hp_file = os.path.join(os.path.dirname(load_name), 'hparams.py')
 
     hp.configure(hp_file)
-    fill_variables()
+    fill_variables(hp)
     save_path = os.path.join(os.path.dirname(load_name), 'dev')
     os.makedirs(save_path, exist_ok=True)
 
     # initialize pytorch
     # model = Transformer(src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, N_e=6, N_d=6, heads=8, d_model=384, dropout=hp.dropout)
-    model = Transformer(src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
-                        n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.ff_conv_kernel_size_encoder,
+    model = Transformer(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim,
+                        d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder, n_head_encoder=hp.n_head_encoder,
+                        ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                        reduction_rate=hp.reduction_rate, dropout=0.0, CTC_training=hp.CTC_training)
+                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_prenet=0.0, dropout_postnet=0.0,
+                        multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
 
     model.to(DEVICE)
     model.eval()
 
     model.load_state_dict(load_model(f"{load_name}"))
-    dataset_test = datasets.get_dataset(hp.test_script)
-    collate_fn_transformer = datasets.collate_fn
-    sampler = datasets.NumBatchSampler(dataset_test, 1, shuffle=False)#hp.batch_size)
+    if args.test_script is not None:
+        test_script = args.test_script
+    else:
+        test_script = hp.test_script
+    dataset_test = datasets_transformer.TestDatasets(test_script)
+    collate_fn_transformer = datasets_transformer.collate_fn_test
+    sampler = datasets_transformer.NumBatchSampler(dataset_test, 1, shuffle=False)#hp.batch_size)
 
     dataloader = DataLoader(dataset_test, batch_sampler=sampler, num_workers=1, collate_fn=collate_fn_transformer)
 
@@ -119,28 +126,31 @@ if __name__ == '__main__':
     var_value = np.load(hp.var_file).reshape(-1, hp.mel_dim)
 
     for idx, d in enumerate(dataloader): 
-        text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb = d
+        text, mel, pos_text, text_lengths, spk_emb = d
+        # torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
 
         text = text.to(DEVICE)
-        mel = mel.to(DEVICE)
+        #mel = mel.to(DEVICE)
         pos_text = pos_text.to(DEVICE)
-        pos_mel = pos_mel.to(DEVICE)
+        #pos_mel = pos_mel.to(DEVICE)
         text_lengths = text_lengths.to(DEVICE)
-        stop_token = stop_token.to(DEVICE)
+        #stop_token = stop_token.to(DEVICE)
+        spk_emb = spk_emb.to(DEVICE)
+        #spk_emb = F.normalize(spk_emb)
 
-        batch_size = mel.shape[0]
-        dummy_input = torch.zeros((1, 1, 80),dtype=torch.float, device=DEVICE)
+        #batch_size = mel.shape[0]
+        dummy_input = torch.zeros((1, 1, 80), dtype=torch.float, device=DEVICE)
 
-        pos_mel = torch.arange(start=1,end=2,dtype=torch.long, device=DEVICE).unsqueeze(0)
+        pos_mel = torch.arange(start=1, end=2, dtype=torch.long, device=DEVICE).unsqueeze(0)
         src_mask, trg_mask = create_masks(pos_text, pos_mel)
         mel_input = dummy_input
-        outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, training=False)
+        outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, spk_emb, training=False)
 
         if hp.reduction_rate >= 1:
-            b,t,c = outputs_prenet.shape
+            b, t, c = outputs_prenet.shape
             outputs_prenet = outputs_prenet.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
             outputs_postnet = outputs_postnet.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
-            mel_input = outputs_postnet[:,-1,:].unsqueeze(1)
+            mel_input = outputs_postnet[:, -1, :].unsqueeze(1)
 
         mel_input = torch.cat((dummy_input, mel_input), dim=1)
         case = 0
@@ -152,17 +162,17 @@ if __name__ == '__main__':
 
                 print(f'{i}')
 
-                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, training=False)
+                outputs_prenet, outputs_postnet, outputs_stop_token, attn_enc, attn_dec_dec, attn_dec_enc = model(text, mel_input, src_mask, trg_mask, spk_emb, training=False)
 
                 if case == 1:
-                    mel_input = torch.cat((mel_input, outputs_postnet[:,-1,:].unsqueeze(1)), dim=1) 
+                    mel_input = torch.cat((mel_input, outputs_postnet[:, -1, :].unsqueeze(1)), dim=1) 
                 else:
                     # mel_input = outputs_postnet
                     if hp.reduction_rate >= 1:
                         b,t,c = outputs_prenet.shape
                         outputs_prenet = outputs_prenet.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
                         outputs_postnet = outputs_postnet.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
-                        mel_input = outputs_postnet[:,::hp.reduction_rate,:]
+                        mel_input = outputs_postnet[:,::hp.reduction_rate, :]
                     mel_input = torch.cat((dummy_input, mel_input), dim=1)
                 # print(mel_input.shape)
                 if hp.reduction_rate > 1:
@@ -171,10 +181,11 @@ if __name__ == '__main__':
                 else:
                     # import pdb; pdb.set_trace()
                     if torch.sigmoid(outputs_stop_token)[0, -1] > 0.5:
-                            break
+                        break
             outputs = outputs_postnet[0].cpu().detach().numpy()
             outputs *= np.sqrt(var_value)
             outputs += mean_value
+            import pdb; pdb.set_trace()
             output_name = os.path.join(save_path, str(idx)+'.npy')
             print(f'save {output_name}')
             np.save(output_name, outputs)

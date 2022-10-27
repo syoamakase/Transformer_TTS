@@ -29,11 +29,12 @@ class EncoderLayer(nn.Module):
     def forward(self, x, mask, spkr_emb=None):
         res = x
         x = self.norm_1(x)
-        out, attn = self.attn(x,x,x,mask, False)
+        out, attn = self.attn(x, x, x , mask, False)
         x = res + self.dropout_1(out)
         res = x
         x = self.norm_2(x)
         if self.multi_speaker:
+            # import pdb; pdb.set_trace()
             spkr_embeds_dec = self.multi_emb(spkr_emb)
             x = x + F.softsign(self.speaker_L_l1_es(spkr_embeds_dec)).unsqueeze(1)
         x = res + self.dropout_2(self.ff(x))
@@ -44,11 +45,11 @@ class ConformerEncoderLayer(nn.Module):
     def __init__(self, d_model, heads, ff_conv_kernel_size, dropout=0.1, multi_speaker=False, spk_emb_dim=None):
         ## TODO: add ff_conv_kernel_size
         super().__init__()
-        self.ff_1 = FeedForwardConformer(d_model, d_ff=d_model*2, dropout=dropout)
+        self.ff_1 = FeedForwardConformer(d_model, d_ff=d_model*2, kernel_size=ff_conv_kernel_size, dropout=dropout)
         self.norm = nn.LayerNorm(d_model)
         self.attn = RelativeMultiHeadAttention(heads, d_model, dropout=dropout)
         self.conv_module = ConvolutionModule(d_model, dropout=dropout)
-        self.ff_2 = FeedForwardConformer(d_model, d_ff=d_model*2, dropout=dropout)
+        self.ff_2 = FeedForwardConformer(d_model, d_ff=d_model*2, kernel_size=ff_conv_kernel_size, dropout=dropout)
 
         self.dropout_1 = nn.Dropout(dropout)
         self.dropout_2 = nn.Dropout(dropout)
@@ -68,13 +69,14 @@ class ConformerEncoderLayer(nn.Module):
         x = x + 0.5 * self.ff_1(x)
         res = x
         x = self.norm(x)
+        ## CHANGE: siwtch the order of self-attention and depthwise conv
+        x = x + self.conv_module(x)
         x, attn_enc_enc = self.attn(x,x,x,pe,mask)
         x = res + self.dropout_1(x)
-        x = x + self.conv_module(x)
 
         if self.multi_speaker:
             spkr_embeds_dec = self.multi_emb(spkr_emb)
-            x = x + F.softsign(self.speaker_L_l1_es(spkr_embeds_dec)).unsqueeze(1)
+            x = x + spkr_embeds_dec.unsqueeze(1) #+ F.softsign(self.speaker_L_l1_es(spkr_embeds_dec)).unsqueeze(1)
         x = x + self.dropout_2(self.ff_2(x))
         return x, attn_enc_enc
 
@@ -97,7 +99,11 @@ class DecoderLayer(nn.Module):
 
         self.multi_speaker = multi_speaker
         if self.multi_speaker:
-            self.multi_emb = nn.Embedding(spk_emb_dim, d_model)
+            if spk_emb_dim == 512:
+                self.multi_emb = nn.Linear(spk_emb_dim, d_model)
+            else:
+                # speaker ID
+                self.multi_emb = nn.Embedding(spk_emb_dim, d_model)
             self.speaker_L_l1_es = nn.Linear(d_model, d_model, bias=False)
 
     def forward(self, x, e_outputs, src_mask, trg_mask, spkr_emb=None):

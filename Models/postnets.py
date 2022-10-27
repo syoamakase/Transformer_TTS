@@ -11,44 +11,34 @@ def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 class PostConvNet(nn.Module):
-    """
-    Post Convolutional Network (mel --> mel)
-    """
-    def __init__(self, hp, num_hidden, mel_dim, reduction_rate, dropout=0.5, output_type=None, num_group=None):
+    def __init__(self, hp, num_hidden, mel_dim, reduction_rate, dropout=0.5, prev_version=True):
+        """post-net
+
+        Args:
+            hp (hparams): hyperparameters 
+            num_hidden (int): dimensions of hidden states.
+            mel_dim (int): dimensions of mel spectrogram.
+            reduction_rate (int): reduction rate.
+            dropout (float, optional): Dropout rate. Defaults to 0.5.
+            output_type (string, optional): . Defaults to None.
+            num_group (int, optional): _description_. Defaults to None.
+        """
         super(PostConvNet, self).__init__()
-        self.output_type = output_type
-        if output_type:
-            self.conv1 = nn.Conv1d(in_channels=mel_dim*reduction_rate*num_group,
-                                   out_channels=num_hidden,
-                                   kernel_size=5,
-                                   padding=4)
-            self.conv_list = clones(nn.Conv1d(in_channels=num_hidden,
-                                            out_channels=num_hidden,
-                                            kernel_size=5,
-                                            padding=4), 3)
-            self.conv2 = nn.Conv1d(in_channels=num_hidden,
-                                out_channels=mel_dim*reduction_rate*num_group,
-                                kernel_size=5,
-                                padding=4)
+        self.prev_version = prev_version
+        self.conv1 = nn.Conv1d(in_channels=mel_dim*reduction_rate,
+                               out_channels=num_hidden,
+                               kernel_size=5,
+                               padding=4)
+        self.conv_list = clones(nn.Conv1d(in_channels=num_hidden,
+                                          out_channels=num_hidden,
+                                          kernel_size=5,
+                                          padding=4), 3)
+        self.conv2 = nn.Conv1d(in_channels=num_hidden,
+                               out_channels=mel_dim * reduction_rate,
+                               kernel_size=5,
+                               padding=4)
 
-            self.out1 = nn.Linear(num_hidden, mel_dim*reduction_rate)
-            self.out2 = nn.Linear(num_hidden, mel_dim*reduction_rate)
-
-        else:
-            print(mel_dim, reduction_rate)
-            self.conv1 = nn.Conv1d(in_channels=mel_dim*reduction_rate,
-                                  out_channels=num_hidden,
-                                  kernel_size=5,
-                                  padding=4)
-            self.conv_list = clones(nn.Conv1d(in_channels=num_hidden,
-                                            out_channels=num_hidden,
-                                            kernel_size=5,
-                                            padding=4), 3)
-            self.conv2 = nn.Conv1d(in_channels=num_hidden,
-                                   out_channels=mel_dim * reduction_rate,
-                                   kernel_size=5,
-                                   padding=4)
-
+        if self.prev_version:
             self.out = nn.Linear(num_hidden, mel_dim * reduction_rate)
 
         ## dev
@@ -72,27 +62,21 @@ class PostConvNet(nn.Module):
         self.dropout_list = nn.ModuleList([nn.Dropout(p=dropout) for _ in range(3)])
 
     def forward(self, input_, mask=None):
-        if self.output_type:
-            mel_pred1 = self.out1(input_).transpose(1, 2)
-            mel_pred2 = self.out2(input_).transpose(1, 2)
-            # Causal Convolution (for auto-regressive)
-            mel_pred = torch.cat((mel_pred1, mel_pred2), dim=1)
-            input_ = self.dropout1(torch.tanh(self.pre_batchnorm(self.conv1(mel_pred)[:, :, :-4])))
-            for batch_norm, conv, dropout in zip(self.batch_norm_list, self.conv_list, self.dropout_list):
-                input_ = dropout(torch.tanh(batch_norm(conv(input_)[:, :, :-4])))
-            input_ = self.conv2(input_)[:, :, :-4]
-            input_ = mel_pred + input_
+        ## older version (until 2022/1/13)
+        if self.prev_version:
+            mel_pred = self.out(input_).transpose(1, 2)
+        else:
+            mel_pred = input_.transpose(1, 2)
+        # Causal Convolution (for auto-regressive)
+        input_ = self.dropout1(torch.tanh(self.pre_batchnorm(self.conv1(mel_pred)[:, :, :-4])))
+        for batch_norm, conv, dropout in zip(self.batch_norm_list, self.conv_list, self.dropout_list):
+            input_ = dropout(torch.tanh(batch_norm(conv(input_)[:, :, :-4])))
+        input_ = self.conv2(input_)[:, :, :-4]
+        input_ = mel_pred + input_
+        if self.prev_version:
             return mel_pred.transpose(1, 2), input_.transpose(1, 2)
         else:
-            ## older version (until 2022/1/13)
-            mel_pred = self.out(input_).transpose(1, 2)
-            # Causal Convolution (for auto-regressive)
-            input_ = self.dropout1(torch.tanh(self.pre_batchnorm(self.conv1(mel_pred)[:, :, :-4])))
-            for batch_norm, conv, dropout in zip(self.batch_norm_list, self.conv_list, self.dropout_list):
-                input_ = dropout(torch.tanh(batch_norm(conv(input_)[:, :, :-4])))
-            input_ = self.conv2(input_)[:, :, :-4]
-            input_ = mel_pred + input_
-            return mel_pred.transpose(1, 2), input_.transpose(1, 2)
+            return mel_pred.transpose(1, 2)
 
 
 class PostLowEnergyv1(nn.Module):
@@ -108,21 +92,18 @@ class PostLowEnergyv1(nn.Module):
         e_outputs, attn_enc = self.encoder(src, src_mask, spkr_emb)
 
         outputs = self.out(e_outputs)
-        
+
         return outputs
 
 class PostLowEnergyv2(nn.Module):
-    def __init__(self, hp, vocab_size, out_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=False, spk_emb_layer=None, gender_emb=False, speaker_emb=False, concat=False, spk_emb_postprocess_type=None, layers_ctc_out=None):
+    def __init__(self, hp, vocab_size, out_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=False, spk_emb_layer=None, gender_emb=False, speaker_emb=False, concat=False, spk_emb_postprocess_type=None, intermediate_layers_out=None):
         super(PostLowEnergyv2, self).__init__()
-        #TODO: speake_emb will be removed
-        ##def __init__(self, vocab_size, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, multi_speaker=False, spk_emb_dim=None, embedding=True):
-        # Add Oct. 16
         self.gender_emb = gender_emb
         self.speaker_emb = speaker_emb
         self.concat = concat
         self.vq_code_flag = hp.vq_code
         self.spk_emb_postprocess_type = spk_emb_postprocess_type
-        self.layers_ctc_out = layers_ctc_out
+        self.intermediate_layers_out = intermediate_layers_out
         self.version = hp.version
 
         if self.concat:
@@ -133,7 +114,7 @@ class PostLowEnergyv2(nn.Module):
             self.linear1 = nn.Linear(vocab_size, d_model)
             self.linear2 = nn.Linear(d_model, d_model)
             if spk_emb_postprocess_type == 'speaker_id':
-                self.linear_xvector = nn.Embedding(spk_emb_dim, d_model)
+                self.linear_xvector = nn.Embedding(hp.num_speakers, d_model)
             elif spk_emb_postprocess_type == 'x_vector':
                 self.linear_xvector = nn.Linear(spk_emb_dim, d_model)
                 #self.layer_norm_xvector = nn.LayerNorm(d_model)
@@ -156,12 +137,9 @@ class PostLowEnergyv2(nn.Module):
         if hp.post_conformer:
             self.encoder = ConformerEncoder(out_dim, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, embedding=embedding)
         else:
-            self.encoder = Encoder(out_dim, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, embedding=embedding, layers_ctc_out=layers_ctc_out)
+            self.encoder = Encoder(out_dim, d_model, N, heads, ff_conv_kernel_size, concat_after_encoder, dropout, embedding=embedding, intermediate_layers_out=intermediate_layers_out)
 
         self.out = nn.Linear(d_model, out_size)
-
-        if self.version == 8:
-            self.out_replace = nn.Linear(d_model, out_size)
 
     def forward(self, src, src_mask, variance_adaptor_output, spkr_emb=None, gender=None):
         if self.concat:
@@ -180,9 +158,9 @@ class PostLowEnergyv2(nn.Module):
             #quantize_sp, diff_sp, embed_ind_sp = self.quantize_sp(vq_input_)
             quantize_lmfb, diff_lmfb, embed_ind_lmfb = self.quantize_lmfb(vq_input_lmfb, mean=True)
             print(embed_ind_lmfb)
-            print(f'diff_lmfb={diff_lmfb.item()}',end=',')
-            input_ = input_  + quantize_lmfb.unsqueeze(1) #+ quantize_sp.unsqueeze(1) + quantize_lmfb.unsqueeze(1)
-            diff = diff_lmfb #diff_sp + diff_lmfb
+            print(f'diff_lmfb={diff_lmfb.item()}', end=',')
+            input_ = input_ + quantize_lmfb.unsqueeze(1) #+ quantize_sp.unsqueeze(1) + quantize_lmfb.unsqueeze(1)
+            diff = diff_lmfb  # diff_sp + diff_lmfb
             
             # TODO: make feature normalize for time sequence
             #vq_input_ = self.vq_encoder_sp(spkr_emb)
@@ -223,18 +201,15 @@ class PostLowEnergyv2(nn.Module):
         #if self.gender_emb or self.speaker_emb or self.ctc_flag:
         #    e_outputs, ctc_out, attn_enc = self.encoder(input_, src_mask, spkr_emb, gender=gender)
         #else:
-        if self.layers_ctc_out:
-            e_outputs, attn_enc, ctc_outs = self.encoder(input_, src_mask, spkr_emb)
+        if self.intermediate_layers_out is not None:
+            e_outputs, attn_enc, intermediate_outs = self.encoder(input_, src_mask, spkr_emb)
         else:
             e_outputs, attn_enc = self.encoder(input_, src_mask, spkr_emb)
-            ctc_outs = None
+            intermediate_outs = None
 
         outputs = self.out(e_outputs)
-        if self.version == 8:
-            outputs_replace = self.out_replace(e_outputs)
-            outputs = (outputs, outputs_replace)
         
-        return outputs, ctc_outs, diff
+        return outputs, intermediate_outs, diff
 
 class Quantize(nn.Module):
     def __init__(self, embeded_dim, n_embed, decay=0.99, eps=1e-5):

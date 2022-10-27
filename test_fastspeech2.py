@@ -90,6 +90,8 @@ if __name__ == '__main__':
     parser.add_argument('--test_script', default=None)
     parser.add_argument('--save', action='store_true')
     parser.add_argument('--use_prenet', action='store_true')
+    parser.add_argument('--pitch_perturbation', action='store_true')
+    parser.add_argument('--duration_perturbation', action='store_true')
     args = parser.parse_args()
     load_name = args.load_name
     test_script = args.test_script
@@ -100,7 +102,7 @@ if __name__ == '__main__':
     hp.configure(hp_file)
     fill_variables(hp)
     epoch = os.path.basename(load_name).replace('network.average_', '')
-    save_path = os.path.join(os.path.dirname(load_name), 'dev/'+epoch)
+    save_path = os.path.join(os.path.dirname(load_name), 'dev.7/'+epoch)
     os.makedirs(save_path, exist_ok=True)
 
     assert hp.architecture == 'text-mel', f'invalid architecture {hp.architecture}'
@@ -114,7 +116,7 @@ if __name__ == '__main__':
                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, 
+                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, dropout_variance_adaptor=0.0,
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
                         pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb,
                         output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
@@ -143,7 +145,7 @@ if __name__ == '__main__':
     total_time = 0
     for idx, d in tqdm(enumerate(dataloader)):
         # torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
-        text, mel, pos_text, text_lengths, spk_emb, accent, gender, spk_emb_postprocess = d
+        text, mel, pos_text, text_lengths, spk_emb, accent, gender, spk_emb_postprocess, hop_size = d
 
         text = text.to(DEVICE)
         #mel = mel.to(DEVICE)
@@ -156,12 +158,17 @@ if __name__ == '__main__':
 
         if hp.accent_emb:
             accent = accent.to(DEVICE)
+
+        if hp.use_hop:
+            hop_size = hop_size.to(DEVICE)
         
         src_mask = (pos_text != 0).unsqueeze(-2)
         local_time = time.time()
         with torch.no_grad():
             local_time = time.time()
-            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, _, _, _, sq_vae_loss, sq_vae_perplexity \
+                = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask, pitch_perturbation=args.pitch_perturbation,
+                        duration_perturbation=args.duration_perturbation, hop_size=hop_size)
 
         if hp.postnet_pred and args.use_prenet is False:
             outputs = outputs_postnet[0].cpu().detach().numpy()

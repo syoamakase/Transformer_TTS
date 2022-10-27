@@ -18,12 +18,13 @@ from tqdm import tqdm
 
 class TrainDatasets(Dataset):
     """
+    UPDATE: 2021 Sept. 6th: add context embedding (for Ja)
     Train dataset.
     """                                                   
-    def __init__(self, csv_file, hp, alignment_pred=True, pitch_pred=True, energy_pred=True):
+    def __init__(self, csv_file, hp, alignment_pred=True, pitch_pred=True, energy_pred=True, accent_emb=False):
         """
         Args:                                                                   
-            csv_file (string): Path to the csv file with annotations.                
+            csv_file (string): Path to the csv file with annotations.
         """
         self.hp = hp
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
@@ -38,6 +39,17 @@ class TrainDatasets(Dataset):
         self.pred_alignment = alignment_pred
         self.pred_f0 = pitch_pred
         self.pred_energy = energy_pred
+        self.accent_emb = accent_emb
+
+        if hp.different_spk_emb_samespeaker:
+            self.x_vector_list = self.spkr_emb_from_same_speaker(num_speakers=hp.num_speakers)
+
+
+    def spkr_emb_from_same_speaker(self, num_speakers):
+        result = [[] for _ in range(num_speakers)]
+        for mel_name, spkr_id in zip(self.landmarks_frame.loc[:,0], self.landmarks_frame.loc[:,2]):
+            result[spkr_id].append(mel_name.replace('.npy', '_xvector.npy'))
+        return result
 
     def load_htk(self, filename):
         fh = open(filename, "rb")
@@ -51,21 +63,34 @@ class TrainDatasets(Dataset):
         fh.close()
         return dat
 
-    def __len__(self):                                                          
+    def __len__(self):
         return len(self.landmarks_frame)
 
-    def __getitem__(self, idx): 
+    def __getitem__(self, idx):
         mel_name = self.landmarks_frame.loc[idx, 0]
-        alignment_name = mel_name.replace('.npy', '_alignment.npy')
+        tail_ali = self.hp.tail_alignment + '.npy'
+        alignment_name = mel_name.replace('.npy', tail_ali)
         f0_name = mel_name.replace('.npy', '_f0.npy')
         energy_name = mel_name.replace('.npy', '_energy.npy')
         text = self.landmarks_frame.loc[idx, 1].strip()
-        
-        if self.hp.is_multi_speaker:
-            spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
-            if self.hp.spk_emb_type == 'speaker_id':
-                spk_emb = int(spk_emb_name)
+
+        if self.hp.use_hop:
+            if 'hop256' in mel_name:
+                hop_size = 1
+            elif 'hop160' in mel_name:
+                hop_size = 2
             else:
+                hop_size = 0
+        else:
+            hop_size = None
+
+        if self.hp.is_multi_speaker:
+            assert self.hp.spk_emb_type == 'speaker_id' or self.hp.spk_emb_type == 'x_vector'
+            if self.hp.spk_emb_type == 'speaker_id':
+                spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
+                spk_emb = int(spk_emb_name)
+            elif self.hp.spk_emb_type == 'x_vector':
+                spk_emb_name = mel_name.replace('.npy', '_xvector.npy')
                 spk_emb = np.load(spk_emb_name.strip())
         else:
             spk_emb = None
@@ -99,7 +124,181 @@ class TrainDatasets(Dataset):
             energy = np.load(energy_name)
         else:
             energy = None
+
+        if self.accent_emb:
+            accentids = self.landmarks_frame.loc[idx, 2]
+            accent = np.array([int(t) for t in accentids.split(' ')], dtype=np.int32) 
+        else:
+            accent = None
+
+        if self.hp.gender_emb:
+            genderid = self.landmarks_frame.loc[idx, 3]
+            gender = np.array([int(genderid)])
+        else:
+            gender = None
+
+        if self.hp.spk_emb_postprocess_type == 'x_vector':
+            if self.hp.different_spk_emb_samespeaker:
+                spk_id = self.landmarks_frame.loc[idx, 2]
+                rand_xvector_name = random.choice(self.x_vector_list[spk_id])
+                spk_emb_postprocess = np.load(rand_xvector_name)
+            else:
+                spk_emb_postprocess = np.load(mel_name.replace('.npy', '_xvector.npy'))
+        elif self.hp.spk_emb_postprocess_type == 'speaker_id':
+            spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
+            spk_emb_postprocess = int(spk_emb_name)
+        else:
+            spk_emb_postprocess = None
+
+        if self.hp.mean_file is not None and self.hp.var_file is not None:
+            mel_input -= self.mean_value
+            mel_input /= np.sqrt(self.var_value)
+
+        if self.hp.model.lower() == 'fastspeech2':
+            mel_length = mel_input.shape[0]
+            reduction_rate = 1
+        else:
+            mel_input = np.concatenate([np.zeros([1, self.hp.mel_dim], np.float32), mel_input], axis=0)
+            mel_length = _round_up(mel_input.shape[0], self.hp.reduction_rate)
+            reduction_rate = self.hp.reduction_rate
+
+        text_length = len(text)
+        stop_token = torch.zeros(mel_input.shape[0])
+        pos_text = np.arange(1, text_length + 1)
+        pos_mel = np.arange(1, mel_length + 1)
+
+        sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel,
+                  'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment, 'accent': accent, 'gender': gender, 
+                  'reduction_rate': reduction_rate, 'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type, 'spk_emb_postprocess':spk_emb_postprocess,
+                  'spk_emb_postprocess_type':self.hp.spk_emb_postprocess_type, 'mel_name':mel_name, 'hop_size': hop_size}
+        return sample
+
+class DevDatasets(Dataset):
+    """
+    UPDATE: 2021 Sept. 6th: add context embedding (for Ja)
+    Train dataset.
+    """
+    def __init__(self, csv_file, hp, alignment_pred=True, pitch_pred=True, energy_pred=True, accent_emb=False):
+        """
+        Args:                                                                   
+            csv_file (string): Path to the csv file with annotations.
+        """
+        self.hp = hp
+        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
+        if self.hp.spm_model is not None:
+            self.sp = spm.SentencePieceProcessor()
+            self.sp.Load(self.hp.spm_model)
+
+        if self.hp.mean_file is not None and self.hp.var_file is not None:
+            self.mean_value = np.load(self.hp.mean_file).reshape(-1, self.hp.mel_dim)
+            self.var_value = np.load(self.hp.var_file).reshape(-1, self.hp.mel_dim)
+
+        self.pred_alignment = alignment_pred
+        self.pred_f0 = pitch_pred
+        self.pred_energy = energy_pred
+        self.accent_emb = accent_emb
+
+        if hp.different_spk_emb_samespeaker:
+            self.x_vector_list = self.spkr_emb_from_same_speaker(num_speakers=hp.num_speakers)
+
+    def spkr_emb_from_same_speaker(self, num_speakers):
+        result = [[] for _ in range(num_speakers)]
+        for mel_name, spkr_id in zip(self.landmarks_frame.loc[:,0], self.landmarks_frame.loc[:,2]):
+            result[spkr_id].append(mel_name.replace('.npy', '_xvector.npy'))
+        return result
+
+    def load_htk(self, filename):
+        fh = open(filename, "rb")
+        spam = fh.read(12)
+        _, _, sampSize, _ = unpack(">IIHH", spam)
+        veclen = int(sampSize / 4)
+        fh.seek(12, 0)
+        dat = np.fromfile(fh, dtype='float32')
+        dat = dat.reshape(int(len(dat) / veclen), veclen)
+        dat = dat.byteswap()
+        fh.close()
+        return dat
+
+    def __len__(self):
+        return len(self.landmarks_frame)
+
+    def __getitem__(self, idx):
+        mel_name = self.landmarks_frame.loc[idx, 0]
+        tail_ali = self.hp.tail_alignment + '.npy'
+        alignment_name = mel_name.replace('.npy', tail_ali)
+        f0_name = mel_name.replace('.npy', '_f0.npy')
+        energy_name = mel_name.replace('.npy', '_energy.npy')
+        text = self.landmarks_frame.loc[idx, 1].strip()
         
+        if self.hp.is_multi_speaker:
+            if self.hp.spk_emb_type == 'speaker_id':
+                spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
+                spk_emb = int(spk_emb_name)
+            elif self.hp.spk_emb_type == 'x_vector':
+                # spk_emb_name = self.landmarks_frame.loc[idx, 5]
+                # spk_emb = np.load(spk_emb_name.strip())
+                spk_emb_name = mel_name.replace('.npy', '_xvector.npy')
+                spk_emb = np.load(spk_emb_name.strip())
+        else:
+            spk_emb = None
+
+        if self.hp.spm_model is not None:
+            textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text)+ [self.sp.eos_id()]
+            text = np.array([int(t) for t in textids], dtype=np.int32)
+        else:
+            text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
+        if '.npy' in mel_name:
+            mel_input = np.load(mel_name)
+            assert mel_input.shape[0] == self.hp.mel_dim or mel_input.shape[1] == self.hp.mel_dim, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
+            if mel_input.shape[1] != self.hp.mel_dim:
+                mel_input = mel_input.reshape(-1, self.hp.mel_dim)
+        elif '.htk' in mel_name:
+            mel_input = self.load_htk(mel_name)[:,:self.hp.mel_dim]
+        elif '.mel' in mel_name:
+            mel_input = torch.load(mel_name).squeeze(0).transpose(0,1).numpy()
+        else:
+            raise ValueError('{} is unknown file extension. Please check the extension or change htk or npy'.format(mel_name))
+
+        if self.pred_alignment:
+            alignment = np.load(alignment_name)
+        else:
+            alignment = None
+        if self.pred_f0:
+            f0 = np.load(f0_name)
+        else:
+            f0 = None
+        if self.pred_energy:
+            energy = np.load(energy_name)
+        else:
+            energy = None
+
+        if self.accent_emb:
+            accentids = self.landmarks_frame.loc[idx, 2]
+            accent = np.array([int(t) for t in accentids.split(' ')], dtype=np.int32) 
+        else:
+            accent = None
+
+        if self.hp.gender_emb:
+            genderid = self.landmarks_frame.loc[idx, 3]
+            gender = np.array([int(genderid)])
+        else:
+            gender = None
+
+        if self.hp.spk_emb_postprocess_type == 'x_vector':
+            if self.hp.different_spk_emb_samespeaker:
+                # xvector_name = self.landmarks_frame.loc[idx, 5]
+                # spk_emb_postprocess = np.load(xvector_name)
+                spk_id = self.landmarks_frame.loc[idx, 2]
+                rand_xvector_name = random.choice(self.x_vector_list[spk_id])
+                spk_emb_postprocess = np.load(rand_xvector_name)
+            else:
+                spk_emb_postprocess = np.load(mel_name.replace('.npy', '_xvector.npy'))
+        elif self.hp.spk_emb_postprocess_type == 'speaker_id':
+            spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
+            spk_emb_postprocess = int(spk_emb_name)
+        else:
+            spk_emb_postprocess = None
+
         if self.hp.mean_file is not None and self.hp.var_file is not None:
             mel_input -= self.mean_value
             mel_input /= np.sqrt(self.var_value)
@@ -118,83 +317,17 @@ class TrainDatasets(Dataset):
         pos_mel = np.arange(1, mel_length+1)
 
         sample = {'text': text, 'text_length':text_length, 'mel_input':mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel,
-                  'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment,
-                  'reduction_rate': reduction_rate, 'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type}
+                  'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'f0':f0, 'energy':energy, 'alignment':alignment, 'accent': accent, 'gender': gender, 
+                  'reduction_rate': reduction_rate, 'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type, 'spk_emb_postprocess':spk_emb_postprocess,
+                  'spk_emb_postprocess_type':self.hp.spk_emb_postprocess_type, 'mel_name':mel_name}
         return sample
 
-class VQWav2vecTrainDatasets(Dataset):
-    def __init__(self, hp, csv_file):
-        """                                                                     
-        Args:                                                                   
-            csv_file (string): Path to the csv file with annotations.           
-            root_dir (string): Directory with all the wavs.                     
-        """                                                                     
-        # self.landmarks_frame = pd.read_csv(csv_file, sep='|', header=None)  
-        self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
-        self.hp = hp
-        if hp.spm_model is not None:
-            self.sp = spm.SentencePieceProcessor()
-            self.sp.Load(hp.spm_model)
-
-        if hp.mean_file is not None and hp.var_file is not None:
-            self.mean_value = np.load(hp.mean_file).reshape(-1, hp.mel_dim)
-            self.var_value = np.load(hp.var_file).reshape(-1, hp.mel_dim)
-                                                                                
-    def load_wav(self, filename):                                               
-        return librosa.load(filename, sr=hp.sample_rate)
-
-    def __len__(self):
-        return len(self.landmarks_frame)
-                                        
-    def __getitem__(self, idx):
-        mel_name = self.landmarks_frame.loc[idx, 0]
-        alignment_name = mel_name.replace('_idx.npy', '_alignment.npy')
-        text = self.landmarks_frame.loc[idx, 1].strip()
-        if self.hp.is_multi_speaker:
-            spk_emb_name = self.landmarks_frame.loc[idx, 2]
-            if self.hp.spk_emb_type == 'speaker_id':
-                spk_emb = int(spk_emb_name)
-            else:
-                spk_emb = np.load(spk_emb_name.strip())
-        else:
-            spk_emb = None
-                                                                                
-        alignment = np.load(alignment_name)
-        if self.hp.spm_model is not None:
-            textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text) + [self.sp.eos_id()]
-            text = np.array([int(t) for t in textids], dtype=np.int32)
-        else:
-            text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
-        if '.npy' in mel_name:
-            mel_input = np.load(mel_name)
-            assert mel_input.shape[0] == self.hp.num_group or mel_input.shape[1] == self.hp.num_group, '{} does not have strange shape {}'.format(mel_name, mel_input.shape)
-            if mel_input.shape[1] != self.hp.num_group:
-                #mel_input = mel_input.reshape(-1, hp.num_group)
-                mel_input = mel_input.T
-                
-        elif '.htk' in mel_name:
-            mel_input = self.load_htk(mel_name)[:,:self.hp.mel_dim]
-        elif '.mel' in mel_name:
-            mel_input = torch.load(mel_name).squeeze(0).transpose(0,1)
-        else:
-            raise ValueError('{} is unknown file extension. Please check the extension or change htk or npy'.format(mel_name))
-
-        text_length = len(text)
-        mel_length = mel_input.shape[0]                
-        assert mel_length == alignment.sum(), f'mel_length {mel_length} is different from alignment sum {alignment.sum()}'
-        pos_text = np.arange(1, text_length + 1)
-        pos_mel = np.arange(1, mel_length + 1)
-        stop_token = torch.zeros(mel_length)
-                                                                                
-        sample = {'text': text, 'text_length': text_length, 'mel_input': mel_input, 'mel_length':mel_length, 'pos_mel':pos_mel, 'pos_text':pos_text, 'stop_token':stop_token, 'spk_emb':spk_emb, 'alignment':alignment, 'is_multi_speaker':self.hp.is_multi_speaker}
-
-        return sample
 
 class TestDatasets(Dataset):
     """
     Test dataset.
     """ 
-    def __init__(self, csv_file, hp):
+    def __init__(self, csv_file, hp, accent_emb=False):
         """                                               
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -202,6 +335,7 @@ class TestDatasets(Dataset):
         """
         self.landmarks_frame = pd.read_csv(csv_file, sep='\|', header=None)
         self.hp = hp
+        self.accent_emb = accent_emb
         if self.hp.spm_model is not None:
             self.sp = spm.SentencePieceProcessor()
             self.sp.Load(self.hp.spm_model)
@@ -217,13 +351,35 @@ class TestDatasets(Dataset):
         mel_output = self.landmarks_frame.loc[idx, 0]
         text = self.landmarks_frame.loc[idx, 1].strip()
         if self.hp.is_multi_speaker:
-            spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
             if self.hp.spk_emb_type == 'speaker_id':
+                spk_emb_name = self.landmarks_frame.loc[idx, 2] #self.landmarks_frame.loc[idx, 2].strip()
                 spk_emb = int(spk_emb_name)
             else:
-                spk_emb = np.load(spk_emb_name.strip())
+                ## TODO: add speaker x vector 
+                xvector_path = self.landmarks_frame.loc[idx, 4]
+                spk_emb = np.load(xvector_path.strip())
         else:
             spk_emb = None
+
+        if self.hp.spk_emb_postprocess_type == 'x_vector':
+            xvector_path = self.landmarks_frame.loc[idx, 5]
+            spk_emb_postprocess = np.load(xvector_path)
+        elif self.hp.spk_emb_postprocess_type == 'speaker_id':
+            spk_emb_name = self.landmarks_frame.loc[idx, 2] 
+            spk_emb_postprocess = int(spk_emb_name)
+        else:
+            spk_emb_postprocess = None
+
+        if self.hp.use_hop:
+            hop_size = self.landmarks_frame.loc[idx, 5]
+            if hop_size == 256:
+                hop_size = 1
+            elif hop_size == 160:
+                hop_size = 2
+            else:
+                hop_size = 0
+        else:
+            hop_size = None
 
         if self.hp.spm_model is not None:
             textids = [self.sp.bos_id()] + self.sp.EncodeAsIds(text)+ [self.sp.eos_id()]
@@ -231,11 +387,25 @@ class TestDatasets(Dataset):
         else:
             text = np.array([int(t) for t in text.split(' ')], dtype=np.int32)
 
+        if self.accent_emb:
+            accentids = self.landmarks_frame.loc[idx, 2]
+            accent = np.array([int(t) for t in accentids.split(' ')], dtype=np.int32) 
+        else:
+            accent = None
+
+        if self.hp.gender_emb:
+            # 2 or 3
+            genderid = self.landmarks_frame.loc[idx, 3]
+            gender = np.array([int(genderid)])
+        else:
+            gender = None
+
         text_length = len(text)
         pos_text = np.arange(1, text_length+1)
 
         sample = {'text': text, 'text_length':text_length, 'mel_output':mel_output, 'pos_text':pos_text, 'spk_emb':spk_emb,
-                  'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type}
+                  'accent': accent,'is_multi_speaker':self.hp.is_multi_speaker, 'spk_emb_type': self.hp.spk_emb_type, 'gender':gender,
+                  'spk_emb_postprocess':spk_emb_postprocess, 'spk_emb_postprocess_type':self.hp.spk_emb_postprocess_type, 'hop_size':hop_size}
 
         return sample
     
@@ -250,7 +420,7 @@ class VQWav2vecTestDatasets(Dataset):
     """
     Test dataset.
     """                                                   
-    def __init__(self, csv_file):                                     
+    def __init__(self, csv_file):
         """                                                                     
         Args:                                                                   
             csv_file (string): Path to the csv file with annotations.           
@@ -306,6 +476,35 @@ def collate_fn_test(batch):
         text_length = [d['text_length'] for d in batch]
         pos_text = [d['pos_text'] for d in batch]
         spk_emb = [d['spk_emb'] for d in batch]
+        spk_emb_postprocess = [d['spk_emb_postprocess'] for d in batch]
+        spk_emb_postprocess_input = spk_emb_postprocess[0]
+        spk_emb_postprocess_type = batch[0]['spk_emb_postprocess_type']
+        hop_size = [d['hop_size'] for d in batch]
+
+        if batch[0]['accent'] is not None:
+            accent = [d['accent'] for d in batch]
+            accent = _prepare_data(accent).astype(np.int32)
+            accent = torch.LongTensor(accent)
+        else:
+            accent = None
+        gender = [d['gender'] for d in batch]
+        gender_input = gender[0] is not None
+        if gender_input:
+            gender = torch.LongTensor(gender)
+        else:
+            gender = None
+
+        if spk_emb_postprocess_type== 'speaker_id': # int
+            spk_emb_postprocess = torch.LongTensor(spk_emb_postprocess)
+        elif spk_emb_postprocess_type == 'x_vector': # float
+            spk_emb_postprocess = torch.FloatTensor(spk_emb_postprocess)
+        else:
+            spk_emb_postprocess = None
+
+        if hop_size[0] is not None:
+            hop_size = torch.LongTensor(hop_size)
+        else:
+            hop_size = None
 
         text = _prepare_data(text).astype(np.int32)
         pos_text = _prepare_data(pos_text).astype(np.int32)
@@ -317,7 +516,7 @@ def collate_fn_test(batch):
                 spk_emb = torch.FloatTensor(spk_emb)
         else:
             spk_emb = None
-        return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb
+        return torch.LongTensor(text), mel_output, torch.LongTensor(pos_text), torch.LongTensor(text_length), spk_emb, accent, gender, spk_emb_postprocess, hop_size
 
 def collate_fn(batch):
     # Puts each data field into a tensor with outer dimension batch size
@@ -325,6 +524,7 @@ def collate_fn(batch):
         reduction_rate = batch[0]['reduction_rate']
         spk_emb_type = batch[0]['spk_emb_type']
         is_multi_speaker = batch[0]['is_multi_speaker']
+        spk_emb_postprocess_type = batch[0]['spk_emb_postprocess_type']
 
         text = [d['text'] for d in batch]
         mel_input = [d['mel_input'] for d in batch]
@@ -337,10 +537,17 @@ def collate_fn(batch):
         f0 = [d['f0'] for d in batch]
         energy = [d['energy'] for d in batch]
         alignment = [d['alignment'] for d in batch]
-        
+        accent = [d['accent'] for d in batch]
+        gender = [d['gender'] for d in batch]
+        mel_name = [d['mel_name'] for d in batch]
+        spk_emb_postprocess = [d['spk_emb_postprocess'] for d in batch]
+        hop_size = [d['hop_size'] for d in batch]
+
         pred_alignment = alignment[0] is not None
         pred_f0 = f0[0] is not None
         pred_energy = energy[0] is not None
+        accent_input = accent[0] is not None
+        gender_input = gender[0] is not None
 
         text = _prepare_data(text).astype(np.int32)
         mel_input = _pad_mel(mel_input, reduction_rate)
@@ -362,6 +569,28 @@ def collate_fn(batch):
             alignment = torch.LongTensor(alignment)
         else:
             alignment = None
+
+        if accent_input:
+            accent = _prepare_data(accent).astype(np.int32)
+            accent = torch.LongTensor(accent)
+        else:
+            accent = None
+
+        if gender_input:
+            gender = torch.LongTensor(gender)
+        else:
+            gender = None
+
+        if hop_size[0] is not None:
+            hop_size = torch.LongTensor(hop_size)
+
+        if spk_emb_postprocess_type== 'speaker_id': # int
+            spk_emb_postprocess = torch.LongTensor(spk_emb_postprocess)
+        elif spk_emb_postprocess_type == 'x_vector': # float
+            spk_emb_postprocess = torch.FloatTensor(spk_emb_postprocess)
+        else:
+            spk_emb_postprocess = None
+
         stop_token = _pad_stop_token(stop_token, reduction_rate, _pad=1.0)
 
         text = torch.LongTensor(text)
@@ -374,13 +603,14 @@ def collate_fn(batch):
 
         if is_multi_speaker:
             if spk_emb_type == 'x_vector':
-                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, torch.FloatTensor(spk_emb), f0, energy, alignment
+                spk_emb = torch.FloatTensor(spk_emb)
+                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, spk_emb, f0, energy, alignment, accent, gender, spk_emb_postprocess, mel_name, hop_size
             elif spk_emb_type == 'speaker_id':
-                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, torch.LongTensor(spk_emb), f0, energy, alignment
+                return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, torch.LongTensor(spk_emb), f0, energy, alignment, accent, gender, spk_emb_postprocess, mel_name
             else:
                 raise AttributeError(f'{spk_emb_type} is unknown in spk_emb_type')
         else:
-            return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, None, torch.FloatTensor(f0), energy, alignment
+            return text, mel_input, pos_text, pos_mel, text_length, mel_length, stop_token, None, torch.FloatTensor(f0), energy, alignment, accent, gender, spk_emb_postprocess, mel_name, hop_size
 
     raise TypeError(("batch must contain tensors, numbers, dicts or lists; found {}"
                     .format(type(batch[0]))))

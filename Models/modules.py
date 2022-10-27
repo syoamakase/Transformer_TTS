@@ -1,3 +1,4 @@
+from turtle import distance
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -111,17 +112,19 @@ class PositionalEncoder(nn.Module):
 
 
 class ConvolutionModule(nn.Module):
-    def __init__(self, d_model, dropout=0.1):
+    def __init__(self, d_model, kernel_size=31, dropout=0.1):
         super().__init__()
         causal = False
-        kernel_size = 31
+        # CHANGE kernel_size = 31 -> 7
+        # kernel_size = 7 #31
         padding = self.calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
 
         self.layer_norm = nn.LayerNorm(d_model)
         self.pointwise_conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_model*2, kernel_size=1)
         self.depth_conv1 = DepthwiseConv(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, padding=padding)
         self.batch_norm = nn.BatchNorm1d(d_model)
-        self.swish = Swish()
+        # CHANGE: replace Swish with ReLU
+        self.act = nn.ReLU() #Swish()
         self.pointwise_conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=1)
         self.dropout = nn.Dropout(dropout)
 
@@ -134,7 +137,7 @@ class ConvolutionModule(nn.Module):
         x = out * gate.sigmoid()
         x = self.depth_conv1(x)
         x = self.batch_norm(x)
-        x = self.swish(x)
+        x = self.act(x)
         x = self.pointwise_conv2(x).transpose(1,2)
         x = self.dropout(x)
 
@@ -161,24 +164,39 @@ class DepthwiseConv(nn.Module):
         return self.conv_out(x)
 
 class FeedForwardConformer(nn.Module):
-    def __init__(self, d_model, d_ff=2048, dropout=0.1):
+    def __init__(self, d_model, d_ff=2048, kernel_size=7, dropout=0.1):
         super().__init__()
         self.layer_norm = nn.LayerNorm(d_model)
+        causal = False
+        padding = self.calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
+        # CHANGE: replace linear with conv
+        # self.conv1 = nn.Conv1d(d_model, d_ff, kernel_size=kernel_size, padding=padding)
         self.linear1 = nn.Linear(d_model, d_ff)
-        self.swish = Swish()
+        # CHANGE: replace Swish with ReLU
+        # self.act = nn.ReLU() #Swish()
+        self.act = Swish()
         self.dropout1 = nn.Dropout(dropout)
+        # self.conv2 = nn.Conv1d(d_ff, d_model, kernel_size=kernel_size, padding=padding)
         self.linear2 = nn.Linear(d_ff, d_model)
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x):
         x = self.layer_norm(x)
+        # import pdb; pdb.set_trace()
+        # x = self.conv1(x.transpose(1,2))
         x = self.linear1(x)
-        x = self.swish(x)
+        x = self.act(x)
         x = self.dropout1(x)
         x = self.linear2(x)
+        # when using conv1
+        # x = self.conv2(x).transpose(1,2)
         x = self.dropout2(x)
 
         return x
+
+    def calc_same_padding(self, kernel_size):
+        pad = kernel_size // 2
+        return pad
 
 class RelativeMultiHeadAttention(nn.Module):
     def __init__(self, heads, d_model, dropout=0.1):
@@ -286,3 +304,99 @@ class RelativePositionalEncoder(nn.Module):
         pe = self.pe[:,:seq_len].to(x.device)
 
         return self.dropout(x), self.dropout(pe)
+
+
+class SQEmbedding(nn.Module):
+    def __init__(self, param_var_q, n_embeddings, embedding_dim):
+        super(SQEmbedding, self).__init__()
+        self.param_var_q = param_var_q
+
+        embedding = torch.Tensor(n_embeddings, embedding_dim)
+        embedding.normal_()
+        self.register_parameter("embedding", nn.Parameter(embedding))
+
+
+    def encode(self, x, log_var_q):
+        M, D = self.embedding.size()
+        x_flat = x.detach().reshape(-1, D)
+        if self.param_var_q == "gaussian_1":
+            log_var_q_flat = log_var_q.reshape(1, 1)
+        elif self.param_var_q == "gaussian_3":
+            log_var_q_flat = log_var_q.reshape(-1, 1)
+        elif self.param_var_q == "gaussian_4":
+            log_var_q_flat = log_var_q.reshape(-1, D)
+        else:
+            raise Exception("undifined param_var_q")
+
+        x_flat = x_flat.unsqueeze(2)
+        log_var_flat = log_var_q_flat.unsqueeze(2)
+        embedding = self.embedding.t().unsqueeze(0)
+        precision_flat = torch.exp(-log_var_flat)
+        distances = 0.5 * torch.sum(precision_flat * ((embedding - x_flat) ** 2), dim=1)
+
+        indices = torch.argmin(distances.float(), dim=-1)
+        quantized = F.embedding(indices, self.embedding)
+        quantized = quantized.view_as(x)
+        return quantized, indices
+
+    def forward(self, x, log_var_q, temperature):
+        M, D = self.embedding.size()
+        batch_size, sample_size, channels = x.size()
+        x_flat = x.reshape(-1, D)
+        if self.param_var_q == "gaussian_1":
+            log_var_q_flat = log_var_q.reshape(1, 1)
+        elif self.param_var_q == "gaussian_3":
+            log_var_q_flat = log_var_q.reshape(-1, 1)
+        elif self.param_var_q == "gaussian_4":
+            log_var_q_flat = log_var_q.reshape(-1, D)
+        else:
+            raise Exception("Undifined param_var_q")
+
+        x_flat = x_flat.unsqueeze(2)
+        log_var_flat = log_var_q_flat.unsqueeze(2)
+        embedding = self.embedding.t().unsqueeze(0)
+        precision_flat = torch.exp(-log_var_flat) # precision, Delta^{-1} = 1/delta I 
+        distances = 0.5 * torch.sum(precision_flat * (embedding - x_flat) ** 2, dim=1) # Mahalanobis distance * 1/2
+
+        indices = torch.argmin(distances.float(), dim=-1)
+
+        logits = -distances
+
+        encodings = self._gumbel_softmax(logits, tau=temperature, dim=-1)
+        quantized = torch.matmul(encodings, self.embedding)
+        quantized = quantized.view_as(x)
+
+        logits = logits.view(batch_size, sample_size, M)
+        probabilities = torch.softmax(logits, dim=-1)
+        log_probabilities = torch.log_softmax(logits, dim=-1)
+
+        precision = torch.exp(-log_var_q)
+
+        loss = torch.mean(0.5 * torch.sum(precision * (x - quantized) ** 2, dim=(1, 2))
+                          + torch.sum(probabilities * log_probabilities, dim=(1, 2))) # H(P(Z_q|Z))
+
+        print(indices, indices.shape)
+        encodings = F.one_hot(indices, M).float()
+        avg_probs = torch.mean(encodings, dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+        return quantized, loss, perplexity, indices
+
+    @staticmethod
+    def _gumbel_softmax(logits, tau=1, hard=False, dim=-1):
+        eps = torch.finfo(logits.dtype).eps
+        gumbels = (
+            -((-(torch.rand_like(logits).clamp(min=eps, max=1 - eps).log())).log())
+        )
+        gumbels_new = (logits + gumbels) / tau # ~Gumbel(logits, tau)
+        y_soft = gumbels_new.softmax(dim)
+
+        if hard:
+            index = y_soft.max(dim, keepdim=True)[1]
+            y_hard = torch.zeros_like(logits).scatter_(dim, index, 1.0)
+            ret = y_hard - y_soft.detach() + y_soft
+
+        else:
+            ret = y_soft
+
+        return ret 

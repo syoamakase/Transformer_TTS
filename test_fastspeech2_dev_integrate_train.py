@@ -16,6 +16,7 @@ import random
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+#from torch.profiler import profile, record_function, ProfilerActivity
 from torch.autograd import Variable
 
 from tqdm import tqdm
@@ -89,6 +90,7 @@ if __name__ == '__main__':
     parser.add_argument('--load_name', required=True)
     parser.add_argument('--test_script', default=None)
     parser.add_argument('--save', action='store_true')
+    parser.add_argument('--save_prenet', action='store_true')
     args = parser.parse_args()
     load_name = args.load_name
     test_script = args.test_script
@@ -99,7 +101,7 @@ if __name__ == '__main__':
     hp.configure(hp_file)
     fill_variables(hp)
     epoch = os.path.basename(load_name).replace('network.average_', '')
-    save_path = os.path.join(os.path.dirname(load_name), 'dev/'+epoch)
+    save_path = os.path.join(os.path.dirname(load_name), 'dev.3/'+epoch)
     os.makedirs(save_path, exist_ok=True)
 
     assert hp.architecture == 'text-mel-mel', f'invalid architecture {hp.architecture}'
@@ -111,7 +113,7 @@ if __name__ == '__main__':
                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, 
+                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, dropout_variance_adaptor=0.0,
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
                         pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, accent_emb=hp.accent_emb,
                         output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture, debug=True)
@@ -121,7 +123,7 @@ if __name__ == '__main__':
     model.eval()
 
     model.load_state_dict(load_model(f"{load_name}"))
-    # To FastSpeech2 dataset 
+    # To FastSpeech2 dataset
     if hp.output_type:
         dataset_test = datasets.VQWav2vecTestDatasets(hp.test_script)
         collate_fn_transformer = datasets.collate_fn_vqwav2vec_test
@@ -160,10 +162,14 @@ if __name__ == '__main__':
         
         src_mask = (pos_text != 0).unsqueeze(-2)
         local_time = time.time()
+        # with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        #with record_function("model_inference"):
         with torch.no_grad():
             local_time = time.time()
             outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, outputs_pro_post, ctc_outs, mask_frames = model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, accent=accent, spkr_emb=spk_emb, spkr_emb_post=xvector)
         
+        # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
         if hp.postnet_pred:
             res_outputs = outputs_pro_post + outputs_postnet
         else:
@@ -200,10 +206,13 @@ if __name__ == '__main__':
             output_name_prenet = os.path.join(save_path, base_name+'_prenet.npy')
             np.save(output_name_prenet, outputs_prenet)
         #output_name = os.path.join(save_path, str(idx)+'.npy')
-        print(f'save {output_name} {outputs.shape}')
+        #print(f'save {output_name} {outputs.shape}')
         # duration_rounded = torch.clamp(torch.round(torch.exp(log_duration_prediction)-self.log_offset), min=0)
         duration_rounded = torch.clamp(torch.round(torch.exp(log_d_prediction)-1), min=0)
-        np.save(output_name, outputs)
+        if args.save_prenet:
+            np.save(output_name, outputs_prenet)
+        else:
+            np.save(output_name, outputs)
         total_time += (time.time() - local_time)
         #np.save(output_name.replace('.npy', '_alignment.npy'), duration_rounded.cpu().numpy()[0])
         sys.stdout.flush()

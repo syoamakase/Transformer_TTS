@@ -113,16 +113,18 @@ if __name__ == '__main__':
     if load_name_tts is None:
         load_name_tts = hp.pretrain_model
 
+    # import pdb; pdb.set_trace()
     # initialize pytorch
     pretrained_model = FastSpeech2(hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
                         n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder,
                         concat_after_encoder=hp.concat_after_encoder,
                         d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
                         ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
-                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0,
+                        reduction_rate=hp.reduction_rate, dropout=0.0, dropout_postnet=0.0, dropout_variance_adaptor=0.0,
                         n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max,
                         pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred, 
-                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spkr_emb_architecture)
+                        output_type=hp.output_type, num_group=hp.num_group, multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim, spk_emb_architecture=hp.spk_emb_architecture)
+
 
     pretrained_model.to(DEVICE)
     pretrained_model.eval()
@@ -138,10 +140,13 @@ if __name__ == '__main__':
         spk_emb_dim = hp.spk_emb_dim_postprocess #if hp.spk_emb_postprocess_type is not None else None
         model = PostLowEnergyv2(hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
                                 heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder,
-                                concat_after_encoder=hp.concat_after_encoder, dropout=0.0,
+                                concat_after_encoder=hp.concat_after_post, dropout=0.0,
                                 multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb,
                                 concat=hp.concat, spk_emb_postprocess_type=hp.spk_emb_postprocess_type)
                                 #multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.num_speaker, spk_emb_layer=[1, 2])
+            #model = PostLowEnergyv2(hp, vocab_size=hp.mel_dim, out_size=hp.mel_dim_post, d_model=hp.d_model_encoder, N=hp.n_layer_encoder,
+            #                        heads=hp.n_head_encoder, ff_conv_kernel_size=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_post, dropout=hp.dropout,
+            #                        multi_speaker=hp.is_multi_speaker, spk_emb_dim=hp.spk_emb_dim_postprocess, gender_emb=hp.gender_emb, speaker_emb=hp.speaker_emb, concat=hp.concat,spk_emb_postprocess_type=hp.spk_emb_postprocess_type)
 
     print('pretrain model')
     print(pretrained_model)
@@ -191,8 +196,8 @@ if __name__ == '__main__':
         src_mask = (pos_text != 0).unsqueeze(-2)
         with torch.no_grad():
             local_time = time.time()
-            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec = pretrained_model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
-        
+            outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, _, _, _, _, _  = pretrained_model(text, src_mask, mel_mask=None, d_target=None, p_target=None, e_target=None, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+            # outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec, None, None, None, sq_vae_loss, sq_vae_perplexity
             if hp.postnet_pred:
                 outputs = outputs_postnet
             else:

@@ -5,6 +5,7 @@ import filecmp
 import os
 import numpy as np
 import random
+import math
 import sys
 import shutil
 import time
@@ -20,6 +21,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
+from torchmetrics import StructuralSimilarityIndexMeasure
+
 from utils import hparams as hp
 from utils.utils import log_config, fill_variables, init_weight, get_learning_rate, load_model
 
@@ -33,6 +36,8 @@ port = '600021'
 random.seed(77)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 scaler = torch.cuda.amp.GradScaler()
+
+ssim = StructuralSimilarityIndexMeasure()
 
 def npeak_mask(size):
     """
@@ -77,6 +82,11 @@ def create_masks(src_pos, trg_pos, task='transformer', src_pad=0, trg_pad=0, deb
     return src_mask, trg_mask
 
 
+def mse_loss_arelbo(input, target):
+    # "Preventing Posterior Collapse Induced by Oversmoothing in Gaussian VAE"
+    # https://arxiv.org/abs/2102.08663
+    return 0.5 * (target.numel() // target.size(0)) * torch.log(torch.mean((input - target) ** 2))
+
 def loss_mel(hp, pred, y, channel_wise=False, loss='l1', channel_weight=None):
     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
     if channel_wise:
@@ -109,7 +119,7 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
-            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment, accent, gender, spk_emb_postprocess, mel_name = d
+            text, mel, pos_text, pos_mel, text_lengths, mel_lengths, stop_token, spk_emb, f0, energy, alignment, accent, gender, spk_emb_postprocess, mel_name, hop_size = d
 
             text = text.to(DEVICE, non_blocking=True)
             mel = mel.to(DEVICE, non_blocking=True)
@@ -128,6 +138,8 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 accent = accent.to(DEVICE, non_blocking=True)
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
                 alignment = alignment.to(DEVICE, non_blocking=True)
+            if hp.use_hop:
+                hop_size = hop_size.to(DEVICE, non_blocking=True)
 
         batch_size = mel.shape[0]
         if hp.reduction_rate > 1:
@@ -141,12 +153,18 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
         src_mask, trg_mask = create_masks(pos_text, pos_mel, task=hp.model, debug=False)
         optimizer.zero_grad()
 
+        if hp.use_sq_vae:
+            # temperature = cfg.training.temperature.init * math.exp(-cfg.training.temperature.decay * global_step)
+            temperature = 1.0 * math.exp(-0.00001 * step)
+        else:
+            temperature = None
+
         with torch.cuda.amp.autocast(hp.amp): #and torch.autograd.set_detect_anomaly(True):
             if False: #hp.CTC_training:
                 outputs_prenet, outputs_postnet, outputs_stop_token, variance_adaptor_output, attn_enc, attn_dec_dec, attn_dec_enc, ctc_outputs, results_each_layer = model(text, mel_input, src_mask, trg_mask, spkr_emb=spk_emb)
             else:
                 if hp.model.lower() == 'fastspeech2':
-                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask)
+                    outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, text_dur_predicted, attn_enc, attn_dec_dec, _, _, _, sq_vae_loss, sq_vae_perplexity = model(text, src_mask, trg_mask, alignment, f0, energy, accent, spkr_emb=spk_emb, fix_mask=hp.fix_mask, temperature=temperature, hop_size=hop_size)
                 elif hp.model.lower() == 'lightspeech':
                     outputs_prenet, outputs_postnet, log_d_prediction, p_prediction, e_prediction, variance_adaptor_output, attn_enc, attn_dec_dec = model(text, src_mask, trg_mask, alignment, f0, energy, spkr_emb=spk_emb, ref_mel=mel, ref_mask=trg_mask)
                 else:
@@ -187,36 +205,40 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                         #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
                         loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
                     else:
-                        mel_loss = nn.L1Loss()(outputs_prenet, mel)
+                        if hp.use_sq_vae:
+                            print('use_sq_vae')
+                            mel_loss = mse_loss_arelbo(outputs_prenet, mel)
+                        else:
+                            mel_loss = nn.L1Loss()(outputs_prenet, mel)
                         if hp.postnet_pred:
                             post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
                             loss = mel_loss + post_mel_loss #+ 0.3 * iter_loss
                         else:
                             loss = mel_loss
 
-                elif hp.model.lower() == 'lightspeech':
-                    mel_loss = nn.L1Loss()(outputs_prenet, mel)
-                    loss = mel_loss 
-                    #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
-                else:
-                    #mel_loss = 0
-                    #post_mel_loss = 0
-                    #iter_loss = 0
-                    #for i, mel_length in enumerate(mel_lengths): 
-                    #    mel_loss += nn.L1Loss()(outputs_prenet[i,:mel_length-1], mel[i,1:mel_length,:])
-                    #    post_mel_loss += nn.L1Loss()(outputs_postnet[i,:mel_length-1], mel[i,1:mel_length,:])
-                    #    for result in results_each_layer:
-                    #        result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
-                    #        iter_loss += nn.L1Loss()(result[i,:mel_length-1], mel[i,1:mel_length,:]) / len(results_each_layer)
+                # elif hp.model.lower() == 'lightspeech':
+                #     mel_loss = nn.L1Loss()(outputs_prenet, mel)
+                #     loss = mel_loss 
+                #     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel)
+                # else:
+                #     #mel_loss = 0
+                #     #post_mel_loss = 0
+                #     #iter_loss = 0
+                #     #for i, mel_length in enumerate(mel_lengths): 
+                #     #    mel_loss += nn.L1Loss()(outputs_prenet[i,:mel_length-1], mel[i,1:mel_length,:])
+                #     #    post_mel_loss += nn.L1Loss()(outputs_postnet[i,:mel_length-1], mel[i,1:mel_length,:])
+                #     #    for result in results_each_layer:
+                #     #        result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
+                #     #        iter_loss += nn.L1Loss()(result[i,:mel_length-1], mel[i,1:mel_length,:]) / len(results_each_layer)
 
-                    mel_loss = nn.L1Loss()(outputs_prenet, mel[:,hp.reduction_rate:,:])
-                    #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-                    post_mel_loss = mel_loss() #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
-                    for result in results_each_layer:
-                        result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
-                        iter_loss += nn.L1Loss()(result, mel[:,hp.reduction_rate:,:]) / len(results_each_layer)
+                #     mel_loss = nn.L1Loss()(outputs_prenet, mel[:,hp.reduction_rate:,:])
+                #     #post_mel_loss = nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
+                #     post_mel_loss = mel_loss() #nn.L1Loss()(outputs_postnet, mel[:,hp.reduction_rate:,:])
+                #     for result in results_each_layer:
+                #         result = result.reshape(b, t*hp.reduction_rate, int(c//hp.reduction_rate))
+                #         iter_loss += nn.L1Loss()(result, mel[:,hp.reduction_rate:,:]) / len(results_each_layer)
 
-                    print(f'loss_iter = {iter_loss.item()}')
+                #     print(f'loss_iter = {iter_loss.item()}')
                 print(f'loss_frame_before = {mel_loss.item()}')
             
             if hp.model.lower() == 'fastspeech2' or hp.model.lower() == 'lightspeech':
@@ -240,12 +262,17 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
                 loss += loss_token
                 print(f'loss_token = {loss_token.item()}')
 
-            if False: #hp.CTC_training:
-                ctc_outputs = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
-                loss_ctc = F.ctc_loss(ctc_outputs, text, mel_lengths_reduction, text_lengths, blank=0)
-                loss += 0.2 * loss_ctc
-                print(f'loss_ctc = {loss_ctc.item()}')
-                #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
+            if hp.use_sq_vae:
+                assert sq_vae_loss is not None and sq_vae_perplexity is not None
+                loss += sq_vae_loss
+                print(f"sq_vae_loss = {sq_vae_loss}")
+                print(f"sq_vae_perplexity = {sq_vae_perplexity}")
+            # if False: #hp.CTC_training:
+            #     ctc_outputs = F.log_softmax(ctc_outputs, dim=2).transpose(0, 1)
+            #     loss_ctc = F.ctc_loss(ctc_outputs, text, mel_lengths_reduction, text_lengths, blank=0)
+            #     loss += 0.2 * loss_ctc
+            #     print(f'loss_ctc = {loss_ctc.item()}')
+            #     #writer.add_scalar("Loss/train_ctc_loss", loss_ctc, step)
 
             #writer.add_scalar("Loss/train_post_mel", post_mel_loss, step)
             #writer.add_scalar("Loss/train_pre_mel", mel_loss, step)
@@ -259,6 +286,11 @@ def train_loop(model, optimizer, step, epoch, args, hp, rank, dataloader):
             #            writer.add_image(f'attn_dec_{n}_{head}', attn_dec_dec[0][n][head], step, dataformats='HW')
                         #writer.add_image(f'attn_dec_enc_{n}_{head}', attn_dec_enc[0][n][head], step, dataformats='HW')
             #print('lr = {}'.format(lr))
+            if hp.use_ssim:
+                ssim_loss = -ssim(outputs_postnet.unsqueeze(1), mel.unsqueeze(1).half())
+                print(f'loss_ssim = {ssim_loss.item()}')
+                loss += ssim_loss
+
             if outputs_postnet is not None:
                 print(f'loss_frame_after = {post_mel_loss.item()}')
             
@@ -350,7 +382,7 @@ def run_training(rank, args, hp, port=None):
         model = FastSpeech2(hp=hp, src_vocab=hp.vocab_size, trg_vocab=hp.mel_dim, d_model_encoder=hp.d_model_encoder, N_e=hp.n_layer_encoder,
                             n_head_encoder=hp.n_head_encoder, ff_conv_kernel_size_encoder=hp.ff_conv_kernel_size_encoder, concat_after_encoder=hp.concat_after_encoder,
                             d_model_decoder=hp.d_model_decoder, N_d=hp.n_layer_decoder, n_head_decoder=hp.n_head_decoder,
-                            ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder,
+                            ff_conv_kernel_size_decoder=hp.ff_conv_kernel_size_decoder, concat_after_decoder=hp.concat_after_decoder, dropout_variance_adaptor=hp.dropout_variance_adaptor,
                             reduction_rate=hp.reduction_rate, dropout=hp.dropout, dropout_postnet=0.5, 
                             n_bins=hp.nbins, f0_min=hp.f0_min, f0_max=hp.f0_max, energy_min=hp.energy_min, energy_max=hp.energy_max, pitch_pred=hp.pitch_pred, energy_pred=hp.energy_pred,
                             accent_emb=hp.accent_emb,

@@ -2,6 +2,7 @@
 import numpy as np
 from struct import unpack
 import os
+import random
 import torch
 import torch.nn as nn
 
@@ -9,6 +10,50 @@ import torch.nn as nn
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def freq_mask(spec, F=10, num_masks=1, replace_with_zero=False, random_mask=False, granularity=1):
+    cloned = spec.clone()
+    num_mel_channels = cloned.shape[1]
+    for i in range(0, num_masks):
+        f = random.randrange(0, F, granularity)
+        if random_mask:
+            sample = np.arange(0, num_mel_channels)
+            masks = random.sample(list(sample), f)
+            if (replace_with_zero): cloned[:, masks] = 0
+            else: cloned[:, masks] = cloned.mean()
+        else:
+            f_zero = random.randrange(0, num_mel_channels - f)
+            # avoids randrange error if values are equal and range is empty
+            if (f_zero == f_zero + f*granularity): return cloned
+            mask_end = random.randrange(f_zero, f_zero + f, granularity)
+            if (replace_with_zero): cloned[:, f_zero:mask_end] = 0
+            else: cloned[:, f_zero:mask_end] = cloned.mean()
+    return cloned
+
+def time_mask(spec, T=50, num_masks=1, replace_with_zero=False, random_mask=False):
+    cloned = spec.clone()
+    len_spectro = cloned.shape[0]
+
+    for i in range(0, num_masks):
+        t = random.randrange(0, T)
+        t_zero = random.randrange(0, len_spectro - t)
+
+        # avoids randrange error if values are equal and range is empty
+        if (t_zero == t_zero + t): return cloned
+
+        mask_end = random.randrange(t_zero, t_zero + t)
+        if (replace_with_zero): cloned[t_zero:mask_end,:] = 0
+        else: cloned[t_zero:mask_end,:] = cloned.mean()
+    return cloned
+                                                                                
+
+def spec_augment(spec, T, F, num_T=1, num_F=1):
+    # spec (B, T, F)
+    for i in range(spec.shape[0]):
+        spec[i] = time_mask(spec[i], T=T, num_masks=num_T, replace_with_zero=True)
+        spec[i] = freq_mask(spec[i], F=F, num_masks=num_F, replace_with_zero=True)
+
+    return spec
+    
 def log_config(hp):
     """To display the parameters of hparams.py
     """
@@ -137,14 +182,24 @@ def overwrite_hparams(args):
             setattr(hp, key, value)
 
 def fill_variables(hp):
-    default_var = {'spm_model':None, 'mean_file':None, 'var_file': None, 'log_dir': 'logs', 'CTC_training': False,
-                   'positive_weight': 5.0, 'is_multi_speaker':False, 'num_speaker': None, 'spkr_emb':'', 'spk_emb_type': None, 
+    default_var = {'spm_model':None, 'mean_file':None, 'var_file': None, 'log_dir': 'logs',
+                   'positive_weight':5.0, 'is_multi_speaker':False, 'num_speaker': None, 'spk_emb_type': None, 'spk_emb_architecture': '',
                     'output_type':None, 'num_group':None, 'pitch_pred':True, 'energy_pred':True, 'model':'Fastspeech2', 'amp':True, 'gst':False,
-                    'encoder_type':'transformer', 'clip':1.0}
+                    'encoder_type':'transformer', 'clip':1.0, 'decoder_type': 'transformer', 'accent_emb':False, 'channel_wise': False, 'tail_alignment':'_alignment',
+                    'gender_emb':False, 'ctc_out':False, 'concat':False, 'vq_code':False, 'speaker_emb':False, 'spk_emb_postprocess_type': None, 'spk_emb_dim_postprocess':None, 'mask':False, 'post_conformer':False,
+                    'fix_mask':None, 'use_cosine_emb_loss': False, 'n_layer_post_model':6, 'semantic_mask':False, 'time_weight': None, 'mask_probability':0.06, 'ff_conv_kernel_size_post':5, 'concat_after_post':True,
+                    'intermediate_layers_out':None, 'dropout_variance_adaptor':0.5, 'use_sq_vae':False, 'spk_emb_dim':None, 'use_rnn_length':False, 'use_pos': False, 'p_scheduled_sampling':0.0, 'use_ssim':False,
+                    'spk_emb_vers':1, 'decoder_type':'transformer', 'use_hop':False} 
+
     for key, value in default_var.items():
         if not hasattr(hp, key):
             print('{} is not found in hparams. defalut {} is used.'.format(key, value))
             setattr(hp, key, value)
+    if hp.spk_emb_postprocess_type == 'x_vector' and hp.spk_emb_dim_postprocess is None:
+        hp.spk_emb_dim_postprocess = 512
+
+    assert not hasattr(hp, 'spkr_emb'), 'hp.spkr_emb is future depricated, please use hp.spk_emb_architecture instead.'
+
 
 def get_learning_rate(step, d_model, warmup_factor, warmup_step):
     """To get a learning rate with Noam optimizer
