@@ -1,0 +1,104 @@
+
+ 
+ vq_code':False, 'speaker_emb':False, 'spk_emb_postprocess_type': None, 'spk_emb_dim_postprocess':None, 'mask':False, 'post_conformer':False,
+'fix_mask':None, 'use_cosine_emb_loss': False, 'n_layer_post_model':6, 'semantic_mask':False, 'time_weight': None, 'mask_probability':0.06, 'ff_conv_kernel_size_post':5, 'concat_after_post':True,
+'intermediate_layers_out':None, 'dropout_variance_adaptor':0.5, 'use_sq_vae':False, 'spk_emb_dim':None, 'use_rnn_length':False, 'use_pos': False, 'p_scheduled_sampling':0.0, 'use_ssim':False} 
+## CONFIG
+#
+comment: ''
+log_dir: logs
+output_type: None
+num_group: None
+concat: False
+
+general:
+    architecture: text-mel
+    model: Fastspeech2
+    vocab_size: 152
+    mel_dim: 80
+    amp: True
+    tail_alignment: _alignment
+
+
+scripts:
+    train_script: /n/work2/ueno/data/libritts/data/train_clean_100/script_16000/train_id.sort.spkid.txt.sacs03
+    test_script: models.nwork1/LibriTTS/post-processing/checkpoints.dev.v25_xvector_l1_linear_xvector_integrate_training_wopostnet_semantic_mask_residual/dev_id.randomid_xvector_in_training.txt
+    spm_model: None
+    mean_file: /n/work2/ueno/data/libritts/data/train_clean_100/script_16000/mean.npy 
+    var_file: /n/work2/ueno/data/libritts/data/train_clean_100/script_16000/var.npy
+    lengths_file: /n/work2/ueno/data/libritts/data/train_clean_100/script_16000/lengths.npy
+
+load_parameters:
+    # If you want to continue training from the middle, please specify
+    loaded_epoch = None
+    loaded_dir = None
+
+optimizer:
+    optimizer: Noam
+    warmup_step: 4000
+    warmup_factor: 1.0
+    max_seqlen: 10000
+    batch_size: None
+
+training_conf:
+    max_epoch: 200
+    average_start: 200 - 9
+    save_per_epoch: 50
+    clip: 1.0
+
+encoder_conf:
+    encoder_type: transformer
+    # setting of Transformer
+    d_model_encoder: 384
+    n_layer_encoder: 6
+    n_head_encoder: 4
+    ff_conv_kernel_size_encoder: 5
+    
+decoder_conf:    
+    decoder_type: transformer
+    d_model_decoder: 384
+    n_layer_decoder: 6
+    n_head_decoder: 4
+
+    ff_conv_kernel_size_decoder: 1
+    concat_after_encoder: False
+    concat_after_decoder: False
+    # in the future remove?
+    postnet_pred: True
+    # For Transformer
+    reduction_rate: 2
+
+network_conf:
+    dropouts:
+        dropout: 0.1
+        prenet_dropout_rate: 0.5
+    
+    positive_weight: 5.0
+
+    use_rnn_length: False
+    gst: False
+    ctc_out: False
+
+acoustic_info:
+    energy_pred: True
+    f0_min: 71.0
+    f0_max: 799.8
+    energy_max: 0.0
+    energy_min: 403.8
+    nbins: 256
+
+    accent_emb: False
+    gender_emb: False 
+
+multi_speakers:
+    is_multi_speakers: False
+    pretrain_model: None #'/n/work1/ueno/models/TTS/Transformer/checkpoints.Transformer.LJSpeech.melgan_16kHz_veryhigh/network.average_epoch991-epoch1000' 
+    spk_emb_type: None #'speaker_id' or 'x_vector'
+    spk_emb_dim: 512
+    num_speakers: None
+    spk_emb_architecture: None
+    # in Mel-to-Mel network
+    different_spk_emb_samespeaker: False
+
+loss:
+    channel_wise: False

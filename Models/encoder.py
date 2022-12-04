@@ -57,7 +57,8 @@ class Encoder(nn.Module):
             self.embed = nn.Linear(vocab_size, d_model)
 
         if accent_emb:
-            self.acc_embed = nn.Embedding(13, d_model)
+            #self.acc_embed = nn.Embedding(10, d_model)
+            self.acc_embed = nn.Embedding(5, d_model)
 
         if gender_emb:
             self.gender_embed = nn.Embedding(2, d_model)

@@ -105,6 +105,7 @@ class PostLowEnergyv2(nn.Module):
         self.spk_emb_postprocess_type = spk_emb_postprocess_type
         self.intermediate_layers_out = intermediate_layers_out
         self.version = hp.version
+        self.phone_embed = hp.phone_embed
 
         if self.concat:
             out_dim = vocab_size + d_model
@@ -112,7 +113,8 @@ class PostLowEnergyv2(nn.Module):
                 out_dim += spk_emb_dim
         else:
             self.linear1 = nn.Linear(vocab_size, d_model)
-            self.linear2 = nn.Linear(d_model, d_model)
+            if self.phone_embed:
+                self.linear2 = nn.Linear(d_model, d_model)
             if spk_emb_postprocess_type == 'speaker_id':
                 self.linear_xvector = nn.Embedding(hp.num_speakers, d_model)
             elif spk_emb_postprocess_type == 'x_vector':
@@ -147,7 +149,10 @@ class PostLowEnergyv2(nn.Module):
             if self.spk_emb_postprocess_type is not None:
                 input_ = torch.cat((input_, spkr_emb.unsqueeze(1).expand(-1, input_.shape[1], -1)), dim=-1)
         else:
-            input_ = self.linear1(src) + self.linear2(variance_adaptor_output)
+            if self.phone_embed:
+                input_ = self.linear1(src) + self.linear2(variance_adaptor_output)
+            else:
+                input_ = self.linear1(src)
             if self.spk_emb_postprocess_type is not None:
                 input_ = input_ + self.linear_xvector(spkr_emb).unsqueeze(1)
                 #input_ = input_ + self.layer_norm_xvector(self.linear_xvector(spkr_emb).unsqueeze(1))

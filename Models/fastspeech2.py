@@ -163,14 +163,13 @@ class FastSpeech2(nn.Module):
 
             #z = z[0,0,:]
             e_outputs = z + e_outputs
-            # import pdb; pdb.set_trace()
         else:
             sq_vae_loss = None
             sq_vae_perplexity = None
 
         if self.hp.use_hop:
             assert hop_size is not None
-            # import pdb; pdb.set_trace()
+            #import pdb; pdb.set_trace()
             emb_hop = self.hop_emb(hop_size).unsqueeze(1)
             e_outputs = emb_hop + e_outputs
 
